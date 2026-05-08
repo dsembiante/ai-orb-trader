@@ -83,6 +83,15 @@ class MarketData(BaseModel):
     orb_breakout_up: Optional[bool] = None      # True if price broke above opening range high
     orb_breakout_down: Optional[bool] = None    # True if price broke below opening range low
 
+    # V2 ORB signal fields — computed at 9:45 ET when the opening range has closed
+    orb_high: Optional[float] = None            # Highest high of 9:30–9:44 ET bars
+    orb_low: Optional[float] = None             # Lowest low of 9:30–9:44 ET bars
+    orb_direction: Optional[str] = None         # 'long' / 'short' / 'neutral'
+    gap_aligned: Optional[bool] = None          # True if gap direction matches orb_direction
+    spy_orb_direction: Optional[str] = None     # SPY's own ORB direction
+    spy_aligned: Optional[bool] = None          # True if SPY ORB direction == orb_direction
+    orb_score: Optional[int] = None             # -4 (strong short) to +4 (strong long)
+
     # Pre-market gap (via fast_info)
     gap_pct: Optional[float] = None             # (last_price - prev_close) / prev_close * 100
     gap_is_bullish: Optional[bool] = None       # True if gap_pct > 0.5%

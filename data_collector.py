@@ -59,6 +59,9 @@ class DataCollector:
         # Ensure cache directory exists before any source tries to write to it
         os.makedirs(config.cache_dir, exist_ok=True)
 
+        # SPY ORB computed once per day and cached across all 15 ticker calls
+        self._spy_orb_cache: dict = {}
+
     def collect(self, ticker: str) -> MarketData:
         """
         Fetch and aggregate all available signals for a single ticker.
@@ -81,6 +84,9 @@ class DataCollector:
         orb_breakout_up = orb_breakout_down = None
         gap_pct = gap_is_bullish = gap_is_bearish = None
         volume_ratio = volume_confirmed = None
+        orb_high = orb_low = orb_direction = None
+        gap_aligned = spy_orb_direction = spy_aligned = None
+        orb_score = None
 
         # ── 1. Alpaca — Current Price & Volume ────────────────────────────────
         try:
@@ -254,6 +260,36 @@ class DataCollector:
         volume_ratio, volume_confirmed                       = self.get_volume_confirmation(ticker)
         atr_pct                                              = self.get_atr(ticker, current_price)
 
+        # ── 7. V2 ORB Signal Fields ───────────────────────────────────────────
+        orb_data      = self.get_orb_data(ticker)
+        orb_high      = orb_data.get('orb_high')
+        orb_low       = orb_data.get('orb_low')
+        orb_direction = orb_data.get('orb_direction')
+
+        if orb_direction and orb_direction != 'neutral' and gap_pct is not None:
+            gap_aligned = (
+                (orb_direction == 'long'  and gap_pct >  0.5) or
+                (orb_direction == 'short' and gap_pct < -0.5)
+            )
+
+        _today_key = datetime.now().strftime('%Y%m%d')
+        if _today_key not in self._spy_orb_cache:
+            self._spy_orb_cache[_today_key] = self.get_orb_data('SPY')
+        spy_orb_data      = self._spy_orb_cache[_today_key]
+        spy_orb_direction = spy_orb_data.get('orb_direction')
+        if (orb_direction and orb_direction != 'neutral'
+                and spy_orb_direction and spy_orb_direction != 'neutral'):
+            spy_aligned = spy_orb_direction == orb_direction
+
+        orb_score = self._compute_orb_score(
+            orb_direction, gap_aligned, spy_aligned, volume_confirmed, price_above_vwap
+        )
+        print(
+            f'[orb_signal] {ticker} — dir={orb_direction} | '
+            f'gap_aligned={gap_aligned} | spy_aligned={spy_aligned} | '
+            f'vol_confirmed={volume_confirmed} | score={orb_score}'
+        )
+
         # ── Assemble & Return ─────────────────────────────────────────────────
         return MarketData(
             ticker=ticker,
@@ -286,6 +322,13 @@ class DataCollector:
             pre_market_price=pre_market_price,
             volume_ratio=volume_ratio,
             volume_confirmed=volume_confirmed,
+            orb_high=orb_high,
+            orb_low=orb_low,
+            orb_direction=orb_direction,
+            gap_aligned=gap_aligned,
+            spy_orb_direction=spy_orb_direction,
+            spy_aligned=spy_aligned,
+            orb_score=orb_score,
             vix=vix,
             data_sources_used=status,
         )
@@ -527,6 +570,89 @@ class DataCollector:
             log_error('vix', '^VIX', str(e))
 
         return None
+
+    def get_orb_data(self, ticker: str) -> dict:
+        """
+        Calculate ORB boundaries and direction from 9:30–9:44 ET 1-minute bars.
+
+        Called at 9:45 ET when the opening range has just closed. Determines
+        which side of the range the current price is on. For SPY, the result is
+        cached in self._spy_orb_cache by collect() so only one Alpaca call is
+        made per day regardless of how many tickers are evaluated.
+
+        Returns a dict with 'orb_high', 'orb_low', 'orb_direction', or an empty
+        dict on any failure — callers must handle missing keys gracefully.
+        """
+        try:
+            bars = self.alpaca.get_stock_bars(StockBarsRequest(
+                symbol_or_symbols=ticker,
+                timeframe=TimeFrame.Minute,
+                start=datetime.now() - timedelta(hours=8),
+            ))
+            df = bars.df.reset_index()
+            if df.empty:
+                return {}
+            ts = pd.to_datetime(df['timestamp'])
+            if ts.dt.tz is None:
+                ts = ts.dt.tz_localize('UTC')
+            df['timestamp'] = ts.dt.tz_convert('America/New_York')
+            df = df.set_index('timestamp')
+            orb_bars = df.between_time('09:30', '09:44')
+            if orb_bars.empty:
+                return {}
+            orb_high  = float(orb_bars['high'].max())
+            orb_low   = float(orb_bars['low'].min())
+            current   = float(df['close'].iloc[-1])
+            if current > orb_high:
+                direction = 'long'
+            elif current < orb_low:
+                direction = 'short'
+            else:
+                direction = 'neutral'
+            print(
+                f'[orb_data] {ticker} — high={orb_high:.2f} low={orb_low:.2f} '
+                f'current={current:.2f} → {direction}'
+            )
+            return {'orb_high': orb_high, 'orb_low': orb_low, 'orb_direction': direction}
+        except Exception as e:
+            log_error('orb_data', ticker, str(e))
+            return {}
+
+    @staticmethod
+    def _compute_orb_score(
+        orb_direction:    'str | None',
+        gap_aligned:      'bool | None',
+        spy_aligned:      'bool | None',
+        volume_confirmed: 'bool | None',
+        price_above_vwap: 'bool | None',
+    ) -> 'int | None':
+        """
+        Score ORB signal strength from -4 (strong short) to +4 (strong long).
+
+        Positive = long bias, magnitude = number of confirming signals.
+        Negative = short bias, magnitude = number of confirming signals.
+        Returns 0 for neutral ORB; None when orb_direction is unknown.
+
+        The four confirmatory signals are gap_aligned, spy_aligned,
+        volume_confirmed, and vwap_aligned (price on correct side of VWAP).
+
+        Note: volume_confirmed is always None before 10:00 AM ET due to the
+        gate in get_volume_confirmation(). At the 9:45 ET ORB cycle the
+        effective ceiling is ±3, not ±4.
+        """
+        if orb_direction is None:
+            return None
+        if orb_direction == 'neutral':
+            return 0
+        is_long      = orb_direction == 'long'
+        vwap_aligned = (price_above_vwap is True) == is_long
+        confirmations = sum([
+            bool(gap_aligned),
+            bool(spy_aligned),
+            bool(volume_confirmed),
+            bool(vwap_aligned),
+        ])
+        return confirmations if is_long else -confirmations
 
     def get_market_regime(self) -> str:
         """
