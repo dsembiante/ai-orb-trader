@@ -1,19 +1,16 @@
 """
-position_monitor.py — Enforces hold period rules and intraday exit discipline.
+position_monitor.py — V2 ORB protective exit enforcement.
 
-Runs on every scheduler cycle to audit all open positions against their
-time-based exit constraints. Two exit mechanisms are managed here:
+Runs on every 1-minute monitor cycle (9:45–11:30 ET) to check open
+positions against V2 exit conditions:
 
-1. Hold Period Expiry — any position that has been held longer than its
-   max_hold_days budget (set at entry time by position_sizer.py) is closed
-   regardless of P&L. This prevents trades from drifting outside their
-   intended risk window.
+1. Protective stop: 2% adverse move from entry — closes immediately.
+2. VWAP cross against direction after 15+ minutes held — closes on reversal.
+3. Hold period expiry (max_hold_days) — multi-day safety net via _check_hold_expiry.
+4. Hard time-based close at 11:30 ET (10:30 CT) via close_all_positions_orb().
 
-2. Intraday Forced Close — all positions classified as 'intraday' are closed
-   before market close (3:45 PM cycle) to eliminate overnight gap risk.
-
-Note: Stop-loss and take-profit exits are handled by Alpaca bracket orders
-placed at entry time via trade_executor.py — not by this module.
+Bracket orders placed at entry via trade_executor.py act as a parallel
+stop-loss; the protective stop here may fire first for intraday moves.
 
 Usage:
     from position_monitor import PositionMonitor
@@ -23,73 +20,22 @@ Usage:
 
 import time
 from database import Database
-from config import config, HoldPeriod
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from logger import log_error
 
 
-def get_profit_threshold(atr_pct, minutes_held: float) -> float:
-    """
-    Return the minimum gain % (as a plain percentage, e.g. 1.5 means 1.5%)
-    required to trigger a dynamic take-profit exit.
-
-    Two-axis logic:
-        - Fresh positions (< 10 min): use full ATR-tiered targets so the
-          position has room to reach its original bracket take-profit.
-        - 10–30 min: lower bar based on session —
-            Morning (before 1 PM ET): 0.35%
-            Afternoon (1 PM ET+):     0.15%  (thinner afternoon momentum)
-        - 30+ min: take any positive gain (0.01%) — position has had time
-          to run; locking in anything beats letting it reverse to flat.
-
-    Args:
-        atr_pct:      ATR as a percentage of price (e.g. 2.3 means 2.3%).
-                      Pass 0 or None to receive the medium-volatility default.
-        minutes_held: Minutes elapsed since entry.
-
-    Returns:
-        Profit threshold as a percentage float.
-    """
-    et_now = datetime.now(ZoneInfo('America/New_York'))
-    is_afternoon = et_now.hour >= 13  # 1:00 PM ET and later
-
-    if minutes_held < 10:
-        # Fresh position — let it run to the full ATR-calibrated target
-        if not atr_pct or atr_pct < 2.0:
-            return 1.5   # Low volatility: AAPL, MSFT, QCOM
-        elif atr_pct < 3.5:
-            return 2.0   # Medium volatility: META, AMZN, NVDA
-        else:
-            return 2.5   # High volatility: TSLA, AMD, COIN
-    elif minutes_held < 30:
-        # Afternoon gets a lower bar — thinner momentum after lunch
-        return 0.15 if is_afternoon else 0.35
-    else:
-        return 0.01      # 30+ min held — take any positive gain
-
-
 class PositionMonitor:
     """
-    Audits open positions on every cycle and triggers time-based exits.
+    Audits open positions on every cycle and triggers protective exits.
     Requires a live TradeExecutor instance to place closing orders.
     """
 
     def __init__(self, trade_executor):
         self.db = Database()
-        # Executor is injected rather than instantiated here to share the
-        # same authenticated Alpaca client used by the rest of the crew
         self.executor = trade_executor
-        # In-memory price history for momentum fade detection.
-        # Keyed by trade_id; each value is [older_price, last_price] (oldest first).
-        # Reset on process restart — only needs to persist across scheduler cycles.
-        self._price_history: dict = {}
-        # In-memory peak gain tracking for trailing profit protection.
-        # Keyed by trade_id; value is the highest gain_pct seen since entry (as a fraction).
-        self._peak_gain_pct: dict = {}
-        # In-memory peak adverse excursion (MAE) tracking.
-        # Keyed by trade_id; value is the most negative gain_pct seen since entry.
-        self._peak_loss_pct: dict = {}
+        self._price_history: dict = {}   # Rolling 5-price window per trade_id — fast_reversal
+        self._peak_gain_pct: dict = {}   # Max favorable excursion per trade_id — stagnant_loss MFE gate
 
     # ── Public Interface ──────────────────────────────────────────────────────
 
@@ -160,69 +106,46 @@ class PositionMonitor:
 
     def check_dynamic_exits(self):
         """
-        Evaluate open positions against dynamic intraday exit conditions.
+        Evaluate open positions against V2 ORB protective exit conditions.
 
-        Runs on every cycle immediately after check_all_positions(). Closes a
-        position when any of the following are true (checked in precedence order):
+        Four exit conditions (checked in precedence order):
+        1. Fast reversal: price 0.3%+ against entry within 10 min AND 3/5 bars adverse.
+        2. Protective stop: 2% adverse move from entry.
+        3. VWAP cross against direction after 15+ minutes held.
+        4. Stagnant loss: 10+ min held, currently losing, MFE never exceeded +0.05%.
 
-        1. VWAP cross against position              — momentum has reversed
-        2. Fast profit lock: 3+ min AND gain >= 0.30%
-        3. Patient profit lock: 10+ min AND gain >= 0.20%
-        4. Breakeven exit: 30+ min AND any positive gain
-        5. ATR-tiered dynamic take-profit           — for positions < 30 min
-        6. Open > 2 hours AND gain > 1%             — free the capital
-        7. SPY drops > 1.5% from today's open       — broad market reversal
-
-        The stop-loss bracket placed at entry is not modified — it remains the
-        hard floor. Only the take-profit side is replaced by this dynamic logic.
+        The hard time-based close at 11:30 ET (10:30 CT) is handled by
+        close_all_positions_orb(), called directly from the scheduler.
         """
         open_trades = self.db.get_open_trades()
         if not open_trades:
             return
 
-        # Live unrealized P&L from Alpaca, keyed by ticker
         alpaca_positions = {p['ticker']: p for p in self.executor.get_open_positions()}
 
-        # SPY intraday change from today's open — shared signal for all positions
-        spy_reversal = False
-        try:
-            import yfinance as yf
-            spy_info = yf.Ticker('SPY').fast_info
-            if spy_info.open and spy_info.last_price and spy_info.open > 0:
-                spy_drop = (spy_info.last_price - spy_info.open) / spy_info.open
-                if spy_drop <= -0.015:
-                    spy_reversal = True
-                    print(f'🚨 SPY down {spy_drop*100:.2f}% from open — dynamic exit triggered for all longs')
-        except Exception as e:
-            log_error('dynamic_exit_spy', 'SPY', str(e))
-
-        # DataCollector provides get_vwap() — imported lazily to avoid a
-        # circular import at module level (data_collector imports config)
         from data_collector import DataCollector
         collector = DataCollector()
 
         for trade in open_trades:
-            ticker = trade['ticker']
+            ticker     = trade['ticker']
             trade_type = trade.get('trade_type', 'buy')
-            is_long = trade_type in ('buy', 'long')
+            is_long    = trade_type in ('buy', 'long')
+            trade_id   = trade['trade_id']
 
             alpaca_pos = alpaca_positions.get(ticker)
             if not alpaca_pos:
                 continue  # Position not yet reflected in Alpaca — skip this cycle
 
-            unrealized_pl = alpaca_pos['unrealized_pl']
             entry_price = trade.get('entry_price')
-            shares = trade.get('shares') or 0
-
-            # Derive current price from Alpaca position — market_value / qty works
-            # for both longs (both positive) and shorts (both negative)
-            raw_qty = alpaca_pos.get('qty') or 0
-            current_price = abs(alpaca_pos['market_value']) / abs(raw_qty) if raw_qty != 0 else None
+            raw_qty     = alpaca_pos.get('qty') or 0
+            current_price = (
+                abs(alpaca_pos['market_value']) / abs(raw_qty) if raw_qty != 0 else None
+            )
 
             # Recovery: if entry_price is NULL or $0.00, recover from Alpaca in order:
             # 1. avg_entry_price from the live position (most reliable — always present)
             # 2. Order history fill price (unreliable if entry leg still pending)
-            # 3. Current market price as last-resort estimate (enables exit logic to fire)
+            # 3. Current market price as last-resort estimate
             if not entry_price:
                 recovered = (
                     alpaca_pos.get('avg_entry_price')
@@ -232,52 +155,39 @@ class PositionMonitor:
                 if recovered:
                     entry_price = recovered
                     self.db.update_entry_price(trade['trade_id'], recovered)
-                    print(f'🔧 {ticker} — recovered entry price ${recovered:.2f} (Alpaca avg_entry_price / fill / current)')
+                    print(f'[{ticker}] recovered entry price ${recovered:.2f}')
                 else:
-                    print(f'⚠️  {ticker} — entry_price NULL and all recovery sources failed — skipping gain checks')
+                    print(f'[{ticker}] entry_price NULL and all recovery sources failed — skipping')
+                    continue
 
-            # Unrealized gain % from entry; None when entry data is missing
-            gain_pct = None
-            if entry_price and entry_price > 0 and shares > 0:
-                gain_pct = unrealized_pl / (entry_price * shares)
-
-            # Update peak gain (MFE) and peak loss (MAE) — track extremes for this trade
-            trade_id = trade['trade_id']
-            if gain_pct is not None:
-                if gain_pct > self._peak_gain_pct.get(trade_id, float('-inf')):
-                    self._peak_gain_pct[trade_id] = gain_pct
-                if gain_pct < self._peak_loss_pct.get(trade_id, float('inf')):
-                    self._peak_loss_pct[trade_id] = gain_pct
-
-            # Time-and-ATR-tiered profit threshold — combines ATR volatility regime
-            # with how long the position has been open. Fresh positions must hit
-            # the full ATR target; aging positions lower the bar to lock in gains
-            # before they reverse.
-            atr_pct = trade.get('atr_pct')
             entry_time_str = trade.get('entry_time')
+            minutes_held   = 0.0
             if entry_time_str:
                 try:
-                    entry_dt = datetime.fromisoformat(entry_time_str)
+                    entry_dt     = datetime.fromisoformat(entry_time_str)
                     minutes_held = (datetime.now() - entry_dt).total_seconds() / 60
                 except Exception:
-                    minutes_held = 0.0
-            else:
-                minutes_held = 0.0
+                    pass
 
-            profit_threshold = get_profit_threshold(atr_pct, minutes_held)
-            _et_now = datetime.now(ZoneInfo('America/New_York'))
-            session_label = 'AFTERNOON' if _et_now.hour >= 13 else 'MORNING'
+            # Signed gain fraction: positive = favorable, negative = adverse
+            gain_pct = None
+            if current_price and entry_price:
+                gain_pct = (
+                    (current_price - entry_price) / entry_price if is_long
+                    else (entry_price - current_price) / entry_price
+                )
+                if gain_pct > self._peak_gain_pct.get(trade_id, float('-inf')):
+                    self._peak_gain_pct[trade_id] = gain_pct
 
             exit_reason = None
 
-            # ── [HIGHEST PRIORITY] Fast reversal exit ──────────────────────────────
-            # Thesis broken: price moved 0.3%+ against entry within first 10 minutes
-            # AND 3 of the last 5 cycle snapshots confirm the adverse side.
-            # Edge case — < 5 snapshots: guard skips rule, falls through to existing checks.
+            # Condition 1: Fast reversal — thesis broken within first 10 minutes.
+            # Requires: price 0.3%+ against entry AND 3 of last 5 price snapshots adverse.
+            # Guards against isolated spikes: requires persistent adverse movement.
             if exit_reason is None and current_price is not None and entry_price and minutes_held < 10:
                 threshold_breached = (
-                    (not is_long and current_price > entry_price * 1.003) or
-                    (is_long     and current_price < entry_price * 0.997)
+                    (is_long     and current_price < entry_price * 0.997) or
+                    (not is_long and current_price > entry_price * 1.003)
                 )
                 if threshold_breached:
                     history = self._price_history.get(trade_id, [])
@@ -289,155 +199,62 @@ class PositionMonitor:
                         if losing_bars >= 3:
                             pct_against = abs(current_price - entry_price) / entry_price * 100
                             direction   = 'LONG' if is_long else 'SHORT'
-                            exit_reason = 'thesis_broken_fast_reversal'
+                            exit_reason = 'fast_reversal_exit'
                             print(
                                 f'[fast_reversal_exit] {ticker} {direction} @ entry ${entry_price:.2f} → '
                                 f'exit ${current_price:.2f} ({pct_against:.2f}% against, '
                                 f'{minutes_held:.0f}min, {losing_bars}/5 bars losing) — thesis broken'
                             )
 
-            # Momentum fade detection — two consecutive declining cycles while below entry.
-            # For longs: fade = price dropped each of the last 2 cycles AND below entry.
-            # For shorts: fade = price rose each of the last 2 cycles AND above entry.
-            if exit_reason is None and current_price is not None and entry_price and minutes_held >= 10:
-                history = self._price_history.get(trade_id, [])
-                if len(history) >= 2:
-                    older_price, last_price = history[-2], history[-1]
-                    below_entry = (is_long and current_price < entry_price) or (not is_long and current_price > entry_price)
-                    fading      = (is_long and current_price < last_price < older_price) or (not is_long and current_price > last_price > older_price)
-                    if below_entry and fading:
-                        exit_reason = 'momentum_fade'
-                        direction = 'lower' if is_long else 'higher'
-                        print(
-                            f'📉 {ticker} confirmed gradual fade — '
-                            f'price {direction} 2 consecutive cycles while against entry — exiting'
-                        )
+            # Condition 2: Protective stop — 2% adverse move from entry
+            if exit_reason is None and current_price and entry_price:
+                adverse_pct = (
+                    (entry_price - current_price) / entry_price if is_long
+                    else (current_price - entry_price) / entry_price
+                )
+                if adverse_pct >= 0.02:
+                    direction   = 'LONG' if is_long else 'SHORT'
+                    exit_reason = 'protective_stop'
+                    print(
+                        f'[protective_stop] {ticker} {direction} @ entry ${entry_price:.2f} → '
+                        f'current ${current_price:.2f} ({adverse_pct * 100:.2f}% adverse) — exiting'
+                    )
 
-            # Update price history for this trade — keep last 5 prices for fast_reversal persistence check
+            # Condition 3: VWAP cross against direction after 15+ minutes held
+            if exit_reason is None and minutes_held >= 15:
+                try:
+                    vwap_val, price_above_vwap = collector.get_vwap(ticker)
+                    if vwap_val is not None:
+                        if is_long and price_above_vwap is False:
+                            exit_reason = 'vwap_cross_exit'
+                            print(
+                                f'[vwap_cross_exit] {ticker} dropped below VWAP ({vwap_val:.2f}) '
+                                f'after {minutes_held:.0f}min — exiting long'
+                            )
+                        elif not is_long and price_above_vwap is True:
+                            exit_reason = 'vwap_cross_exit'
+                            print(
+                                f'[vwap_cross_exit] {ticker} rose above VWAP ({vwap_val:.2f}) '
+                                f'after {minutes_held:.0f}min — exiting short'
+                            )
+                except Exception as e:
+                    log_error('dynamic_exit_vwap', ticker, str(e))
+
+            # Condition 4: Stagnant loss — 10+ min held, losing, MFE never reached +0.05%.
+            # Cuts dead-money positions that entered wrong and never showed upside.
+            if exit_reason is None and gain_pct is not None and minutes_held >= 10 and gain_pct < 0:
+                mfe = self._peak_gain_pct.get(trade_id, 0.0)
+                if mfe <= 0.0005:
+                    exit_reason = 'stagnant_loss_exit'
+                    print(
+                        f'[stagnant_loss_exit] {ticker} held {minutes_held:.0f}min, '
+                        f'MFE {mfe * 100:.2f}%, current {gain_pct * 100:.2f}% — cutting dead-money position'
+                    )
+
+            # Update rolling price history for fast_reversal persistence check (keep last 5)
             if current_price is not None:
                 history = self._price_history.get(trade_id, [])
                 self._price_history[trade_id] = (history + [current_price])[-5:]
-
-            # Time-based loss exit — cut losing positions early before the bracket fires.
-            # Triggers only after 20 min held. Threshold mirrors ATR stop tiers so
-            # the dynamic exit fires at the same level as the bracket stop.
-            if atr_pct and atr_pct >= 3.5:
-                _loss_threshold = -0.0150   # 1.5% — high-vol names
-            elif atr_pct and atr_pct >= 2.0:
-                _loss_threshold = -0.0100   # 1.0% — med-vol names
-            else:
-                _loss_threshold = -0.0075   # 0.75% — low-vol / ATR unavailable
-            if exit_reason is None and gain_pct is not None and minutes_held >= 20 and gain_pct <= _loss_threshold:
-                exit_reason = 'time_loss_exit'
-                print(
-                    f'⏱️ {ticker} held {minutes_held:.0f}min at {gain_pct*100:.2f}% '
-                    f'— time-based loss exit triggered, cutting position'
-                )
-
-            # Peak profit trailing exit — protect gains that have pulled back significantly.
-            # Only activates once peak has reached 0.25%; exits if pullback from peak >= 0.15%.
-            # Runs before the tiered threshold so a reversing winner exits immediately.
-            if exit_reason is None and gain_pct is not None:
-                peak = self._peak_gain_pct.get(trade_id, 0.0)
-                if peak >= 0.0025:
-                    pullback = peak - gain_pct
-                    if pullback >= 0.0015:
-                        exit_reason = 'peak_pullback_exit'
-                        print(
-                            f'📈 {ticker} peak was +{peak*100:.2f}% now +{gain_pct*100:.2f}% '
-                            f'— pulled back {pullback*100:.2f}% from peak — exiting to protect profits'
-                        )
-
-            # Fetch VWAP once per ticker — used by VWAP cross, loss-VWAP, and SPY checks
-            vwap_val = price_above_vwap = None
-            try:
-                vwap_val, price_above_vwap = collector.get_vwap(ticker)
-            except Exception as e:
-                log_error('dynamic_exit_vwap', ticker, str(e))
-
-            # Condition 1: VWAP cross against long position [highest precedence profit-side rule]
-            if exit_reason is None and is_long:
-                if vwap_val is not None and price_above_vwap is False:
-                    exit_reason = 'vwap_cross_exit'
-                    print(f'📉 {ticker} dropped below VWAP ({vwap_val:.2f}) — exiting long')
-
-            # Stagnant loss exit — 20+ min held, currently losing, and never reached +0.05%
-            # Covers positions that entered wrong and drifted negative without any favorable move.
-            if exit_reason is None and gain_pct is not None and minutes_held >= 20 and gain_pct < 0:
-                _mfe = trade.get('max_favorable_excursion_pct') or 0.0
-                if _mfe <= 0.0005:
-                    exit_reason = 'stagnant_loss_exit'
-                    print(
-                        f'🧊 {ticker} stagnant_loss_exit — held {minutes_held:.0f}min, '
-                        f'MFE {_mfe*100:.2f}%, current {gain_pct*100:.2f}%'
-                    )
-
-            # Tiered profit lock — bar lowers as hold time increases
-            if exit_reason is None and gain_pct is not None and minutes_held >= 2 and gain_pct >= 0.003:
-                exit_reason = 'PROFIT_2MIN_030'
-                print(f'⚡ {ticker} profit lock — held {minutes_held:.0f}min at {gain_pct*100:.2f}% (>= 0.30%) — EXITING')
-
-            if exit_reason is None and gain_pct is not None and minutes_held >= 3 and gain_pct >= 0.002:
-                exit_reason = 'PROFIT_3MIN_020'
-                print(f'⚡ {ticker} profit lock — held {minutes_held:.0f}min at {gain_pct*100:.2f}% (>= 0.20%) — EXITING')
-
-            if exit_reason is None and gain_pct is not None and minutes_held >= 10 and gain_pct >= 0.0015:
-                exit_reason = 'PROFIT_10MIN_015'
-                print(f'🔒 {ticker} profit lock — held {minutes_held:.0f}min at {gain_pct*100:.2f}% (>= 0.15%) — EXITING')
-
-            if exit_reason is None and gain_pct is not None and minutes_held >= 15 and gain_pct > 0:
-                exit_reason = 'PROFIT_15MIN_ANY'
-                print(f'⏱️ {ticker} profit lock — held {minutes_held:.0f}min at {gain_pct*100:.2f}% (any positive) — EXITING')
-
-            # Condition 5: ATR-tiered dynamic take-profit (handles < 30 min positions not caught above)
-            if exit_reason is None and gain_pct is not None:
-                gain_display = f'{gain_pct * 100:+.2f}%'
-                if gain_pct > profit_threshold / 100:
-                    exit_reason = 'dynamic_take_profit'
-                    print(
-                        f'⏱️  {ticker} held {minutes_held:.0f}min [{session_label}] — profit threshold: {profit_threshold:.2f}% '
-                        f'(current gain: {gain_display}) — ABOVE threshold, exiting'
-                    )
-                else:
-                    print(
-                        f'⏱️  {ticker} held {minutes_held:.0f}min [{session_label}] — profit threshold: {profit_threshold:.2f}% '
-                        f'(current gain: {gain_display}) — BELOW threshold, holding'
-                    )
-
-            # Condition 6: open > 2 hours AND gain > 1% — free the capital
-            if exit_reason is None and gain_pct is not None and gain_pct > 0.01:
-                entry_time = datetime.fromisoformat(trade['entry_time'])
-                hours_open = (datetime.now() - entry_time).total_seconds() / 3600
-                if hours_open >= 2.0:
-                    exit_reason = 'dynamic_time_profit'
-                    print(f'⏱️ {ticker} 2h+ with {gain_pct*100:.2f}% gain — freeing capital')
-
-            # Condition 7: SPY broad market reversal — exit all longs
-            if exit_reason is None and is_long and spy_reversal:
-                exit_reason = 'spy_reversal_exit'
-                print(f'🚨 {ticker} closed: SPY intraday reversal > 1.5%')
-
-            # Loss + VWAP momentum reversal against position
-            if exit_reason is None and vwap_val is not None:
-                market_value = alpaca_pos.get('market_value')
-                if market_value and abs(market_value) > 0:
-                    loss_pct = unrealized_pl / abs(market_value)
-                    if is_long and loss_pct < -0.015 and price_above_vwap is False:
-                        exit_reason = 'loss_vwap_reversal'
-                        print(f'🛑 {ticker} loss-based exit: {loss_pct*100:.1f}% loss + VWAP reversal — cutting position')
-                    elif not is_long and loss_pct < -0.015 and price_above_vwap is True:
-                        exit_reason = 'loss_vwap_reversal'
-                        print(f'🛑 {ticker} loss-based exit: {loss_pct*100:.1f}% loss + VWAP reversal — cutting position')
-
-            # Persist MFE/MAE to DB on every cycle so position_detail logging can read them
-            try:
-                self.db.update_mfe_mae(
-                    trade['trade_id'],
-                    self._peak_gain_pct.get(trade_id),
-                    self._peak_loss_pct.get(trade_id),
-                )
-            except Exception:
-                pass
 
             if exit_reason:
                 try:
@@ -453,11 +270,10 @@ class PositionMonitor:
                 except Exception as e:
                     log_error('dynamic_exit', ticker, str(e))
 
-        # Clean up in-memory dicts for positions that are no longer open
+        # Clean up in-memory state for trades no longer open
         active_ids = {t['trade_id'] for t in open_trades}
-        self._price_history  = {k: v for k, v in self._price_history.items()  if k in active_ids}
-        self._peak_gain_pct  = {k: v for k, v in self._peak_gain_pct.items()  if k in active_ids}
-        self._peak_loss_pct  = {k: v for k, v in self._peak_loss_pct.items()  if k in active_ids}
+        self._price_history = {k: v for k, v in self._price_history.items() if k in active_ids}
+        self._peak_gain_pct = {k: v for k, v in self._peak_gain_pct.items() if k in active_ids}
 
     def check_market_reversal(self) -> 'str | None':
         """
@@ -545,9 +361,9 @@ class PositionMonitor:
         Called at the start of every scheduler cycle before reconcile_bracket_exits.
         Silent when all DB records match live Alpaca state.
         """
-        open_trades = self.db.get_open_trades()
+        open_trades      = self.db.get_open_trades()
         alpaca_positions = self.executor.get_open_positions()
-        live_tickers = {p['ticker'] for p in alpaca_positions}
+        live_tickers     = {p['ticker'] for p in alpaca_positions}
 
         # Warn about positions Alpaca holds that have no matching DB open record
         db_open_tickers = {t['ticker'] for t in open_trades}
@@ -572,7 +388,7 @@ class PositionMonitor:
 
             # Parse entry_time for after-filter — prevents matching exit orders
             # from a prior trade on the same ticker traded multiple times today
-            entry_dt = None
+            entry_dt       = None
             entry_time_str = trade.get('entry_time')
             if entry_time_str:
                 try:
@@ -663,7 +479,7 @@ class PositionMonitor:
             trade: A trade record dict as returned by Database.get_open_trades().
         """
         entry_time = datetime.fromisoformat(trade['entry_time'])
-        days_held = (datetime.now() - entry_time).days
+        days_held  = (datetime.now() - entry_time).days
 
         # Fall back to 5 days (swing default) if the field is missing from
         # legacy records written before max_hold_days was added to the schema
@@ -695,85 +511,32 @@ class PositionMonitor:
                 # prevent the monitor from checking the remaining positions
                 log_error('position_monitor', trade['ticker'], str(e))
 
-    # ── Intraday Exit Logic ───────────────────────────────────────────────────
+    # ── ORB Hard Close ────────────────────────────────────────────────────────
 
-    def is_intraday_close_time(self) -> bool:
+    def close_all_positions_orb(self):
         """
-        Returns True after 3:30 PM local time — the window during which all
-        intraday positions must be closed before the 4:00 PM market close.
-
-        The 3:45 PM scheduler cycle checks this flag before calling
-        close_all_intraday(), giving a 15-minute execution buffer.
-        """
-        now = datetime.now(ZoneInfo('America/New_York'))
-        return now.hour >= 15 and now.minute >= 30
-
-    def close_all_intraday(self):
-        """
-        Force-close every open position before market close.
+        Force-close every open position at the ORB hard-close time (10:30 CT).
 
         Uses Alpaca's live position list as the source of truth — closes ALL
-        open Alpaca positions regardless of whether they exist in the DB or
-        have valid entry prices. This is the last line of defense against
-        overnight positions; DB state is never relied on here.
-
-        Hybrid overnight rule: DB-tracked intraday positions with > 3%
-        unrealized gain in a BULL regime are upgraded to swing instead of
-        being force-closed. The position stays open with its bracket intact.
-
-        Guard: if config.allow_intraday is False no intraday positions should
-        exist; the early return is a safety net for that case.
-
-        Every close attempt is individually logged so Railway logs show the
-        full picture even when some closures fail.
+        open Alpaca positions regardless of DB state. Exit reason is recorded
+        as 'orb_time_exit' for every closure. Called by run_orb_hard_close()
+        in scheduler.py at 11:30 ET (10:30 CT) each trading day.
         """
-        if not config.allow_intraday:
-            print('⚠️  Intraday disabled — no intraday positions to close')
-            return
-
-        # ── Source of truth: Alpaca live positions ────────────────────────────
-        # Do NOT rely solely on DB open trades — positions entered via a code
-        # path whose DB insert failed are invisible to get_open_trades() but
-        # are still live in Alpaca and must be closed.
         live_positions = {p['ticker']: p for p in self.executor.get_open_positions()}
 
         if not live_positions:
-            print('✅ EOD: No open Alpaca positions — nothing to close')
+            print('[orb_close] No open Alpaca positions — nothing to close')
             return
 
         tickers_str = ', '.join(live_positions.keys())
-        print(f'🔴 EOD close: {len(live_positions)} open position(s) detected — {tickers_str}')
+        print(f'[orb_close] Hard close: {len(live_positions)} position(s) — {tickers_str}')
 
-        # Build DB trade index for record updates after close
-        open_trades = self.db.get_open_trades()
+        open_trades  = self.db.get_open_trades()
         db_by_ticker = {t['ticker']: t for t in open_trades}
-
-        # Market regime fetched once for the hybrid overnight rule
-        from data_collector import DataCollector
-        market_regime = DataCollector().get_market_regime()
 
         for ticker, alpaca_pos in live_positions.items():
             db_trade = db_by_ticker.get(ticker)
 
-            # Hybrid overnight rule: DB-tracked intraday trade with > 3% gain
-            # in a bull regime → upgrade to swing instead of force-closing.
-            if db_trade and db_trade.get('hold_period') == 'intraday' and market_regime == 'bull':
-                entry_price = db_trade.get('entry_price')
-                shares = db_trade.get('shares') or 0
-                if entry_price and entry_price > 0 and shares > 0:
-                    gain_pct = alpaca_pos['unrealized_pl'] / (entry_price * shares)
-                    if gain_pct > 0.03:
-                        print(
-                            f'🌙 {ticker} upgraded to swing: {gain_pct*100:.2f}% gain '
-                            f'in bull regime — holding overnight'
-                        )
-                        try:
-                            self.db.upgrade_trade_to_swing(db_trade['trade_id'])
-                        except Exception as e:
-                            log_error('upgrade_to_swing', ticker, str(e))
-                        continue  # Skip force-close — position stays open as swing
-
-            # Determine side from live Alpaca position (not the DB record)
             position_side = 'long'
             side_val = alpaca_pos.get('side')
             if side_val and str(side_val).lower() in ('short', 'positionside.short'):
@@ -781,11 +544,8 @@ class PositionMonitor:
             elif float(alpaca_pos.get('qty', 0)) < 0:
                 position_side = 'short'
 
-            action = 'market sell' if position_side == 'long' else 'buy-to-cover'
-            print(f'🔴 EOD closing {ticker} ({position_side}) — submitting {action}')
-
+            print(f'[orb_close] Closing {ticker} ({position_side})')
             try:
-                # Cancel bracket legs first to prevent Alpaca error 40310000
                 self.executor._cancel_open_orders(ticker)
                 time.sleep(2)
                 self.executor.client.close_position(ticker)
@@ -793,26 +553,21 @@ class PositionMonitor:
                 exit_price = self.executor.get_filled_exit_price(ticker)
 
                 price_str = f'${exit_price:.2f}' if exit_price else 'unknown'
-                print(f'✅ EOD {ticker} closed successfully at {price_str}')
+                print(f'[orb_close] {ticker} closed at {price_str}')
 
-                # Update DB if this position has a matching trade record
                 if db_trade:
                     try:
                         self.db.update_trade_status(
                             db_trade['trade_id'],
                             status='closed',
-                            exit_reason='intraday_forced_close',
+                            exit_reason='orb_time_exit',
                             exit_price=exit_price,
                         )
                     except Exception as e:
-                        log_error('eod_db_update', ticker, str(e))
-                        print(f'⚠️  EOD {ticker} — Alpaca close succeeded but DB update failed: {e}')
+                        log_error('orb_close_db_update', ticker, str(e))
                 else:
-                    print(f'⚠️  EOD {ticker} — no DB record (orphan position) — Alpaca position closed')
+                    print(f'[orb_close] {ticker} — no DB record (orphan position) — Alpaca position closed')
 
             except Exception as e:
-                log_error('intraday_close', ticker, str(e))
-                print(f'❌ EOD {ticker} failed — reason: {e}')
-
-        # Daily performance is recorded unconditionally in end_of_day() in
-        # scheduler.py so it fires even on days with no open positions at EOD.
+                log_error('orb_close', ticker, str(e))
+                print(f'[orb_close] {ticker} failed: {e}')
