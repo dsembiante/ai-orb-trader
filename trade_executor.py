@@ -159,16 +159,10 @@ class TradeExecutor:
                     if decision.stop_loss_price and decision.stop_loss_price >= decision.entry_price:
                         print(f'[executor] {decision.ticker} — invalid stop loss above entry, recalculating')
                         decision.stop_loss_price = round(decision.entry_price * (1 - config.long_stop_loss_pct), 2)
-                    if decision.take_profit_price and decision.take_profit_price <= decision.entry_price:
-                        print(f'[executor] {decision.ticker} — invalid take profit below entry, recalculating')
-                        decision.take_profit_price = round(decision.entry_price * (1 + config.intraday_take_profit_pct), 2)
                 else:  # short
                     if decision.stop_loss_price and decision.stop_loss_price <= decision.entry_price:
                         print(f'[executor] {decision.ticker} — invalid stop loss below entry for short, recalculating')
                         decision.stop_loss_price = round(decision.entry_price * (1 + config.intraday_stop_loss_pct), 2)
-                    if decision.take_profit_price and decision.take_profit_price >= decision.entry_price:
-                        print(f'[executor] {decision.ticker} — invalid take profit above entry for short, recalculating')
-                        decision.take_profit_price = round(decision.entry_price * (1 - config.intraday_take_profit_pct), 2)
 
             # ── Price rounding ────────────────────────────────────────────────
             # Alpaca rejects prices with more than 2 decimal places (sub-penny
@@ -178,8 +172,9 @@ class TradeExecutor:
                 decision.entry_price      = round(decision.entry_price, 2)
             if decision.stop_loss_price:
                 decision.stop_loss_price  = round(decision.stop_loss_price, 2)
-            if decision.take_profit_price:
-                decision.take_profit_price = round(decision.take_profit_price, 2)
+            # V2: take-profit set 10% wide — exits are managed by position_monitor.py
+            is_long_side = type_str in ('buy',)
+            wide_take_profit = round(decision.entry_price * (1.10 if is_long_side else 0.90), 2)
 
             # ── Marketable limit / high-conviction market override ────────────
             # Plain limit orders at exactly current price routinely miss on
@@ -232,7 +227,7 @@ class TradeExecutor:
                     time_in_force=TimeInForce.DAY,   # Unfilled entry expires at market close
                     limit_price=decision.entry_price,
                     order_class='bracket',
-                    take_profit=TakeProfitRequest(limit_price=decision.take_profit_price),
+                    take_profit=TakeProfitRequest(limit_price=wide_take_profit),
                     stop_loss=StopLossRequest(stop_price=decision.stop_loss_price),
                 )
             else:
@@ -252,11 +247,11 @@ class TradeExecutor:
                     side=side,
                     time_in_force=TimeInForce.DAY,
                     order_class='bracket',
-                    take_profit=TakeProfitRequest(limit_price=decision.take_profit_price),
+                    take_profit=TakeProfitRequest(limit_price=wide_take_profit),
                     stop_loss=StopLossRequest(stop_price=decision.stop_loss_price),
                 )
 
-            print(f'[executor] {decision.ticker} — submitting: stop ${decision.stop_loss_price}, target ${decision.take_profit_price}, entry ${decision.entry_price}')
+            print(f'[executor] {decision.ticker} — submitting: stop ${decision.stop_loss_price}, wide_tp ${wide_take_profit} (+10%), entry ${decision.entry_price}')
             order = self.client.submit_order(order_data)
 
             print(f'[executor] {decision.ticker} — placed successfully')
