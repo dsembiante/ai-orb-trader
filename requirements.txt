@@ -4,7 +4,6 @@ crewai-tools
 groq
 langchain-groq
 pydantic
-streamlit
 finnhub-python
 yfinance
 fredapi
@@ -16,5 +15,4 @@ python-dotenv
 schedule
 psycopg2-binary
 sqlalchemy
-plotly
 requests
