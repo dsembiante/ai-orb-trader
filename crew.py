@@ -1182,15 +1182,23 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker):
                     continue
 
                 # ── Exposure Cap Gate ─────────────────────────────────────────
-                # Hard block when total deployed capital >= 80% of portfolio.
+                # Hard block on position count before checking capital exposure.
+                if len(open_positions) >= config.max_positions:
+                    print(
+                        f'⏭️ {ticker} — max positions reached '
+                        f'({config.max_positions} open), skipping'
+                    )
+                    continue
+
+                # Hard block when total deployed capital >= 95% of portfolio.
                 # Uses the snapshot of open_positions taken at cycle start;
                 # abs() handles shorts whose market_value is negative in Alpaca.
                 _total_exposure = sum(abs(p.get('market_value', 0)) for p in open_positions)
                 _exposure_pct   = (_total_exposure / portfolio_value * 100) if portfolio_value else 0.0
-                if _exposure_pct >= 80.0:
+                if _exposure_pct >= 95.0:
                     print(
                         f'⏭️ {ticker} — exposure cap reached '
-                        f'({_exposure_pct:.1f}% of portfolio deployed, 80% max)'
+                        f'({_exposure_pct:.1f}% of portfolio deployed, 95% max)'
                     )
                     continue
 
