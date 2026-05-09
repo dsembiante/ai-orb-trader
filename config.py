@@ -131,6 +131,7 @@ class Config(BaseModel):
     # ── Multi-Strategy Configuration ─────────────────────────────────────────
     gap_fade_enabled: bool = os.getenv('GAP_FADE_ENABLED', 'false').lower() == 'true'
     vwap_reversion_enabled: bool = False     # VWAP reversion strategy (12:00–2:30 PM ET)
+    position_monitor_enabled: bool = False   # Set to True to enable intraday exit monitoring
     gap_fade_min_gap_pct: float = 5.0        # Minimum gap % to qualify for gap fade
     gap_fade_window_end: str = "10:45"       # ET time to stop gap fade entries
     vwap_reversion_window_start: str = "12:00"  # ET time to start VWAP reversion

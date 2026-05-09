@@ -39,6 +39,7 @@ try:
 except Exception:
     pass  # Non-fatal — worst case the banner appears until the file is written
 
+from config import config
 import schedule, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -179,14 +180,15 @@ schedule.every().day.at('11:30').do(run_orb_hard_close)
 # EOD report
 schedule.every().day.at('16:00').do(end_of_day)
 
-# 1-minute position monitor: 9:45–11:29 ET
-for _hour in range(9, 12):
-    for _minute in range(0, 60):
-        if _hour == 9 and _minute < 45:
-            continue  # Before ORB cycle fires
-        if _hour == 11 and _minute >= 30:
-            continue  # Hard close handles 11:30 ET
-        schedule.every().day.at(f'{_hour:02d}:{_minute:02d}').do(run_monitor_check)
+# 15-minute position monitor: 9:45–11:29 ET
+if config.position_monitor_enabled:
+    for _hour in range(9, 12):
+        for _minute in range(0, 60, 15):
+            if _hour == 9 and _minute < 45:
+                continue  # Before ORB cycle fires
+            if _hour == 11 and _minute >= 30:
+                continue  # Hard close handles 11:30 ET
+            schedule.every().day.at(f'{_hour:02d}:{_minute:02d}').do(run_monitor_check)
 
 
 # ── Process Entrypoint ────────────────────────────────────────────────────────

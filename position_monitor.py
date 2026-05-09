@@ -186,8 +186,8 @@ class PositionMonitor:
             # Guards against isolated spikes: requires persistent adverse movement.
             if exit_reason is None and current_price is not None and entry_price and minutes_held < 10:
                 threshold_breached = (
-                    (is_long     and current_price < entry_price * 0.997) or
-                    (not is_long and current_price > entry_price * 1.003)
+                    (is_long     and current_price < entry_price * 0.995) or
+                    (not is_long and current_price > entry_price * 1.005)
                 )
                 if threshold_breached:
                     history = self._price_history.get(trade_id, [])
