@@ -49,7 +49,6 @@ class DataSourceStatus(BaseModel):
     alpaca: bool = True    # Real-time price & account data
     finnhub: bool = True   # News sentiment & alternative data
     yfinance: bool = True  # Technical indicators & fundamentals
-    fred: bool = True      # Macro economic series
     groq: bool = True      # LLM inference availability
 
 

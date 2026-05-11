@@ -35,7 +35,6 @@ from zoneinfo import ZoneInfo
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from fredapi import Fred
 from models import MarketData, DataSourceStatus
 from config import config
 from logger import log_error
@@ -52,9 +51,6 @@ class DataCollector:
         # intraday indicators (avoids yfinance rate-limit bans on server IPs)
         self.alpaca = StockHistoricalDataClient(
             config.alpaca_api_key, config.alpaca_secret_key)
-
-        # FRED client — macro economic series
-        self.fred = Fred(api_key=config.fred_api_key)
 
         # Ensure cache directory exists before any source tries to write to it
         os.makedirs(config.cache_dir, exist_ok=True)
@@ -229,27 +225,12 @@ class DataCollector:
         # ── 4. VIX — Volatility Index ─────────────────────────────────────────
         vix = self.get_vix()
 
-        # ── 5. FRED — Macro Economic Context ─────────────────────────────────
-        try:
-            macro_cache = f"{config.cache_dir}/macro_{datetime.now().strftime('%Y%m%d')}.json"
-            if os.path.exists(macro_cache):
-                with open(macro_cache) as f:
-                    macro = json.load(f)
-            else:
-                fed_rate  = self.fred.get_series('FEDFUNDS').iloc[-1]
-                inflation = self.fred.get_series('CPIAUCSL').pct_change(12, fill_method=None).iloc[-1] * 100
-                macro = {'fed_rate': float(fed_rate), 'inflation': float(inflation)}
-                with open(macro_cache, 'w') as f:
-                    json.dump(macro, f)
-
-            macro_context = (
-                f"Fed Rate: {macro['fed_rate']:.2f}%, "
-                f"Inflation: {macro['inflation']:.2f}%"
-            )
-
-        except Exception as e:
-            status.fred = False
-            log_error('fred', ticker, str(e))
+        # ── 5. Macro Economic Context ─────────────────────────────────────────
+        # FEDFUNDS and CPIAUCSL update monthly. Update when Fed moves rates or
+        # CPI is released.
+        _FED_RATE  = 4.33  # Federal Funds Rate, May 2026
+        _INFLATION = 2.40  # CPI YoY%, May 2026
+        macro_context = f"Fed Rate: {_FED_RATE:.2f}%, Inflation: {_INFLATION:.2f}%"
 
         # ── 6. Intraday Indicators (all via Alpaca) ───────────────────────────
         current_price = price or 0.0

@@ -6,7 +6,6 @@ langchain-groq
 pydantic
 finnhub-python
 yfinance
-fredapi
 pandas
 pandas-ta
 numpy

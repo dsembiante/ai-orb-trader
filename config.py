@@ -76,7 +76,6 @@ class Config(BaseModel):
 
     # ── External Data Sources ─────────────────────────────────────────────────
     finnhub_api_key: str = os.getenv('FINNHUB_API_KEY', '')  # Real-time quotes & news
-    fred_api_key: str = os.getenv('FRED_API_KEY', '')        # Macro economic data
     groq_api_key: str = os.getenv('GROQ_API_KEY', '')        # LLM inference
 
     # ── LLM Settings ──────────────────────────────────────────────────────────
