@@ -131,7 +131,7 @@ class Config(BaseModel):
     gap_fade_enabled: bool = os.getenv('GAP_FADE_ENABLED', 'true').lower() == 'true'
     vwap_reversion_enabled: bool = False     # exit signal only — not a standalone strategy
     position_monitor_enabled: bool = False   # Set to True to enable intraday exit monitoring
-    orb_extended_enabled: bool = os.getenv('ORB_EXTENDED_ENABLED', 'false').lower() == 'true'
+    orb_extended_enabled: bool = os.getenv('ORB_EXTENDED_ENABLED', 'true').lower() == 'true'
     momentum_enabled: bool = True
 
     # Strategy time gates — controls which strategies are evaluated at each cycle
