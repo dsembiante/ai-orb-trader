@@ -697,12 +697,12 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, orb_window: str = '15min'
             # it in get_open_positions(). Using the stale Alpaca snapshot caused
             # double-close attempts and phantom DB records with None exit_price.
             # Extended cycle (30-min ORB): skip tickers that already have an open
-        # position from the 9:45 ET primary cycle — one trade per ticker per day.
-        if orb_window == '30min' and ticker in db_open_trades_by_ticker:
-            print(f'⏭️  {ticker} — position from 9:45 ET cycle, skipping extended entry')
-            continue
+            # position from the 9:45 ET primary cycle — one trade per ticker per day.
+            if orb_window == '30min' and ticker in db_open_trades_by_ticker:
+                print(f'⏭️  {ticker} — position from 9:45 ET cycle, skipping extended entry')
+                continue
 
-        if ticker in db_open_trades_by_ticker:
+            if ticker in db_open_trades_by_ticker:
                 db_trade = db_open_trades_by_ticker[ticker]  # guaranteed non-None
                 trade_type = db_trade.get('trade_type', 'buy')
                 entry_price = db_trade.get('entry_price')
