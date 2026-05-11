@@ -62,7 +62,7 @@ class DataCollector:
         # SPY ORB computed once per day and cached across all 15 ticker calls
         self._spy_orb_cache: dict = {}
 
-    def collect(self, ticker: str) -> MarketData:
+    def collect(self, ticker: str, orb_window_end: str = '09:44') -> MarketData:
         """
         Fetch and aggregate all available signals for a single ticker.
 
@@ -261,7 +261,7 @@ class DataCollector:
         atr_pct                                              = self.get_atr(ticker, current_price)
 
         # ── 7. V2 ORB Signal Fields ───────────────────────────────────────────
-        orb_data      = self.get_orb_data(ticker)
+        orb_data      = self.get_orb_data(ticker, window_end=orb_window_end)
         orb_high      = orb_data.get('orb_high')
         orb_low       = orb_data.get('orb_low')
         orb_direction = orb_data.get('orb_direction')
@@ -571,14 +571,15 @@ class DataCollector:
 
         return None
 
-    def get_orb_data(self, ticker: str) -> dict:
+    def get_orb_data(self, ticker: str, window_end: str = '09:44') -> dict:
         """
-        Calculate ORB boundaries and direction from 9:30–9:44 ET 1-minute bars.
+        Calculate ORB boundaries and direction from 9:30–{window_end} ET 1-minute bars.
 
-        Called at 9:45 ET when the opening range has just closed. Determines
-        which side of the range the current price is on. For SPY, the result is
-        cached in self._spy_orb_cache by collect() so only one Alpaca call is
-        made per day regardless of how many tickers are evaluated.
+        Called at 9:45 ET (window_end='09:44', 15-min ORB) or 10:00 ET
+        (window_end='09:59', 30-min ORB). Determines which side of the range
+        the current price is on. For SPY, the result is cached in
+        self._spy_orb_cache by collect() so only one Alpaca call is made per
+        day regardless of how many tickers are evaluated.
 
         Returns a dict with 'orb_high', 'orb_low', 'orb_direction', or an empty
         dict on any failure — callers must handle missing keys gracefully.
@@ -597,7 +598,7 @@ class DataCollector:
                 ts = ts.dt.tz_localize('UTC')
             df['timestamp'] = ts.dt.tz_convert('America/New_York')
             df = df.set_index('timestamp')
-            orb_bars = df.between_time('09:30', '09:44')
+            orb_bars = df.between_time('09:30', window_end)
             if orb_bars.empty:
                 return {}
             orb_high  = float(orb_bars['high'].max())

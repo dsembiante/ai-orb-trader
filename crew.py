@@ -478,7 +478,7 @@ def run_vwap_reversion_ticker(
 
 # ── Main Cycle ────────────────────────────────────────────────────────────────
 
-def run_trading_cycle(circuit_breaker: CircuitBreaker):
+def run_trading_cycle(circuit_breaker: CircuitBreaker, orb_window: str = '15min'):
     """
     Execute one full analysis and trading cycle across the entire watchlist.
 
@@ -696,7 +696,13 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker):
             # position and write status='closed' to DB while Alpaca still shows
             # it in get_open_positions(). Using the stale Alpaca snapshot caused
             # double-close attempts and phantom DB records with None exit_price.
-            if ticker in db_open_trades_by_ticker:
+            # Extended cycle (30-min ORB): skip tickers that already have an open
+        # position from the 9:45 ET primary cycle — one trade per ticker per day.
+        if orb_window == '30min' and ticker in db_open_trades_by_ticker:
+            print(f'⏭️  {ticker} — position from 9:45 ET cycle, skipping extended entry')
+            continue
+
+        if ticker in db_open_trades_by_ticker:
                 db_trade = db_open_trades_by_ticker[ticker]  # guaranteed non-None
                 trade_type = db_trade.get('trade_type', 'buy')
                 entry_price = db_trade.get('entry_price')
@@ -862,7 +868,10 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker):
             # ── Data Collection ───────────────────────────────────────────────
             # collect() returns partial data on source failure — DataSourceStatus
             # tracks which sources were reachable so agents can adjust confidence.
-            market_data = collector.collect(ticker)
+            market_data = collector.collect(
+                ticker,
+                orb_window_end='09:59' if orb_window == '30min' else '09:44',
+            )
 
             # Without a price from Alpaca we cannot size a position — skip entirely
             if not market_data.data_sources_used.alpaca:
@@ -1137,7 +1146,7 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker):
             # Shows the key fields needed for trade review without dumping full prompts.
             _reasoning = (decision.risk_manager_reasoning or decision.bull_reasoning or '')[:120]
             print(
-                f'🤖 {ticker}: execute={decision.execute} | '
+                f'🤖 {ticker}: execute={decision.execute} | orb_window={orb_window} | '
                 f'confidence={decision.confidence:.2f} | '
                 f'type={decision.trade_type or "none"} | '
                 f'{_reasoning}'
