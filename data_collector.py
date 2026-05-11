@@ -58,7 +58,8 @@ class DataCollector:
         # SPY ORB computed once per day and cached across all 15 ticker calls
         self._spy_orb_cache: dict = {}
 
-    def collect(self, ticker: str, orb_window_end: str = '09:44') -> MarketData:
+    def collect(self, ticker: str, orb_window_end: str = '09:44',
+                use_gap_fade: bool = True, use_momentum: bool = True) -> MarketData:
         """
         Fetch and aggregate all available signals for a single ticker.
 

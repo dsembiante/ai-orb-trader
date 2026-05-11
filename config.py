@@ -128,10 +128,15 @@ class Config(BaseModel):
     position_max_days: int = 20
 
     # ── Multi-Strategy Configuration ─────────────────────────────────────────
-    gap_fade_enabled: bool = os.getenv('GAP_FADE_ENABLED', 'false').lower() == 'true'
-    vwap_reversion_enabled: bool = False     # VWAP reversion strategy (12:00–2:30 PM ET)
+    gap_fade_enabled: bool = os.getenv('GAP_FADE_ENABLED', 'true').lower() == 'true'
+    vwap_reversion_enabled: bool = False     # exit signal only — not a standalone strategy
     position_monitor_enabled: bool = False   # Set to True to enable intraday exit monitoring
     orb_extended_enabled: bool = os.getenv('ORB_EXTENDED_ENABLED', 'false').lower() == 'true'
+    momentum_enabled: bool = True
+
+    # Strategy time gates — controls which strategies are evaluated at each cycle
+    orb_cutoff_cycle: str = '10:00'      # ORB only valid at 9:45 and 10:00 ET
+    gap_fade_cutoff_cycle: str = '10:15' # Gap fade only valid through 10:15 ET
     gap_fade_min_gap_pct: float = 5.0        # Minimum gap % to qualify for gap fade
     gap_fade_window_end: str = "10:45"       # ET time to stop gap fade entries
     vwap_reversion_window_start: str = "12:00"  # ET time to start VWAP reversion

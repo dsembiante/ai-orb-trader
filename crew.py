@@ -478,7 +478,7 @@ def run_vwap_reversion_ticker(
 
 # ── Main Cycle ────────────────────────────────────────────────────────────────
 
-def run_trading_cycle(circuit_breaker: CircuitBreaker, orb_window: str = '15min'):
+def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'):
     """
     Execute one full analysis and trading cycle across the entire watchlist.
 
@@ -493,6 +493,8 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, orb_window: str = '15min'
         circuit_breaker: Shared CircuitBreaker instance from scheduler.py.
                          Passed in (rather than instantiated here) so the peak
                          value high-water mark persists across cycles.
+        cycle_time: ET time this cycle was scheduled for (e.g. '09:45', '10:00').
+                    Determines ORB window width and strategy gate evaluation.
     """
     # ── Market Hours Gate ─────────────────────────────────────────────────────
     # Reject cycles outside regular trading hours (9:30 AM – 3:45 PM ET,
@@ -504,6 +506,9 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, orb_window: str = '15min'
     if et_now.weekday() >= 5 or not (market_open <= et_now.time() <= market_close):
         print(f'⏰ Outside market hours ({et_now.strftime("%a %H:%M ET")}) — skipping trading cycle')
         return
+
+    # Derive ORB window from cycle time — 30-min range for all extended cycles
+    orb_window = '30min' if cycle_time >= '10:00' else '15min'
 
     run_log = new_run_log(config.watchlist)
     start_time = datetime.now()
@@ -696,10 +701,9 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, orb_window: str = '15min'
             # position and write status='closed' to DB while Alpaca still shows
             # it in get_open_positions(). Using the stale Alpaca snapshot caused
             # double-close attempts and phantom DB records with None exit_price.
-            # Extended cycle (30-min ORB): skip tickers that already have an open
-            # position from the 9:45 ET primary cycle — one trade per ticker per day.
-            if orb_window == '30min' and ticker in db_open_trades_by_ticker:
-                print(f'⏭️  {ticker} — position from 9:45 ET cycle, skipping extended entry')
+            # Extended cycles: skip tickers already traded today — one trade per ticker per day.
+            if cycle_time != '09:45' and ticker in db_open_trades_by_ticker:
+                print(f'⏭️  {ticker} — already traded today, skipping {cycle_time} ET cycle')
                 continue
 
             if ticker in db_open_trades_by_ticker:
@@ -868,9 +872,17 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, orb_window: str = '15min'
             # ── Data Collection ───────────────────────────────────────────────
             # collect() returns partial data on source failure — DataSourceStatus
             # tracks which sources were reachable so agents can adjust confidence.
+
+            # Strategy time gates
+            use_orb      = cycle_time <= config.orb_cutoff_cycle
+            use_gap_fade = config.gap_fade_enabled and cycle_time <= config.gap_fade_cutoff_cycle
+            use_momentum = config.momentum_enabled
+
             market_data = collector.collect(
                 ticker,
                 orb_window_end='09:59' if orb_window == '30min' else '09:44',
+                use_gap_fade=use_gap_fade,
+                use_momentum=use_momentum,
             )
 
             # Without a price from Alpaca we cannot size a position — skip entirely
@@ -1145,8 +1157,14 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, orb_window: str = '15min'
             # Replaces the verbose ╭──────╮ agent output (suppressed via verbose=False).
             # Shows the key fields needed for trade review without dumping full prompts.
             _reasoning = (decision.risk_manager_reasoning or decision.bull_reasoning or '')[:120]
+            _orb_breakout = market_data.orb_direction not in (None, 'neutral')
+            strategy_used = (
+                'orb'      if use_orb and _orb_breakout else
+                'gap_fade' if use_gap_fade              else
+                'momentum'
+            )
             print(
-                f'🤖 {ticker}: execute={decision.execute} | orb_window={orb_window} | '
+                f'🤖 {ticker}: execute={decision.execute} | strategy={strategy_used} | '
                 f'confidence={decision.confidence:.2f} | '
                 f'type={decision.trade_type or "none"} | '
                 f'{_reasoning}'

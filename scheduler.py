@@ -111,22 +111,27 @@ def run_orb_cycle():
 
 
 def run_orb_cycle_extended():
-    """
-    Extended ORB entry cycle — fires at 10:00 ET.
+    """Extended ORB entry cycle — fires at 10:00 ET. Delegates to run_orb_cycle_timed()."""
+    run_orb_cycle_timed('10:00')
 
-    Uses the 30-minute opening range (9:30–9:59 ET). Skips tickers that
-    already have an open position from the 9:45 ET primary cycle. Gated
-    by config.orb_extended_enabled (default False).
+
+def run_orb_cycle_timed(cycle_time: str):
+    """
+    Reusable extended ORB entry cycle — fires at cycle_time ET.
+
+    Gated by config.orb_extended_enabled (default False). Passes cycle_time
+    through to run_trading_cycle() for ORB window selection and logging.
+    Skips tickers that already have an open position from a prior cycle.
     """
     if not config.orb_extended_enabled:
         return
     if not market_is_open():
         return
-    print(f'{datetime.now()} — Extended ORB cycle starting (10:00 ET / 9:00 CT)')
+    print(f'{datetime.now()} — Extended ORB cycle starting ({cycle_time} ET)')
     try:
-        run_trading_cycle(cb, orb_window='30min')
+        run_trading_cycle(cb, cycle_time=cycle_time)
     except Exception as e:
-        print(f'[orb_cycle_extended] Error: {e}')
+        print(f'[orb_cycle_{cycle_time.replace(":", "")}] Error: {e}')
         log_run(error=str(e))
 
 
@@ -185,17 +190,21 @@ def end_of_day():
 
 # ── V2 Schedule ───────────────────────────────────────────────────────────────
 # All times are ET (Railway: TZ=America/New_York).
-# ORB period: 9:30–9:45 ET. Single entry cycle fires at 9:45 ET.
+# Primary ORB cycle: 9:45 ET. Extended cycles: 10:00–11:00 ET (flag-gated).
 # Monitor window: 9:45–11:29 ET (1-min cadence, protective exits only).
 # Hard close: 11:30 ET (10:30 CT). EOD report: 4:00 PM ET.
 
-print('V2 ORB scheduler starting — cycle: 09:45 ET | extended: 10:00 ET (flag-gated) | monitor: 09:45–11:30 ET | hard close: 11:30 ET')
+print('V2 ORB scheduler starting — cycle: 09:45 ET | extended: 10:00–11:00 ET (flag-gated) | monitor: 09:45–11:30 ET | hard close: 11:30 ET')
 
 # Primary ORB entry cycle (15-min range: 9:30–9:44 ET)
 schedule.every().day.at('09:45').do(run_orb_cycle)
 
-# Extended ORB entry cycle (30-min range: 9:30–9:59 ET) — no-op unless ORB_EXTENDED_ENABLED=true
+# Extended ORB entry cycles — no-op unless ORB_EXTENDED_ENABLED=true
 schedule.every().day.at('10:00').do(run_orb_cycle_extended)
+schedule.every().day.at('10:15').do(run_orb_cycle_timed, '10:15')
+schedule.every().day.at('10:30').do(run_orb_cycle_timed, '10:30')
+schedule.every().day.at('10:45').do(run_orb_cycle_timed, '10:45')
+schedule.every().day.at('11:00').do(run_orb_cycle_timed, '11:00')
 
 # Hard close at 10:30 CT (11:30 ET)
 schedule.every().day.at('11:30').do(run_orb_hard_close)
@@ -217,7 +226,7 @@ if config.position_monitor_enabled:
 # ── Process Entrypoint ────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print('Trading scheduler started — cycle: 09:45 ET | extended: 10:00 ET (flag-gated) | monitor: 09:45–11:30 ET | hard close: 11:30 ET')
+    print('Trading scheduler started — cycle: 09:45 ET | extended: 10:00–11:00 ET (flag-gated) | monitor: 09:45–11:30 ET | hard close: 11:30 ET')
     while True:
         schedule.run_pending()
         time.sleep(30)
