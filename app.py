@@ -78,20 +78,20 @@ def get_trades_by_cycle() -> pd.DataFrame:
     return query("""
         SELECT 
             CASE 
-                WHEN EXTRACT(HOUR FROM entry_time AT TIME ZONE 'America/New_York') = 9
-                     AND EXTRACT(MINUTE FROM entry_time AT TIME ZONE 'America/New_York') < 55
+                WHEN EXTRACT(HOUR FROM entry_time) = 9
+                     AND EXTRACT(MINUTE FROM entry_time) < 55
                      THEN '09:45'
-                WHEN EXTRACT(HOUR FROM entry_time AT TIME ZONE 'America/New_York') = 10
-                     AND EXTRACT(MINUTE FROM entry_time AT TIME ZONE 'America/New_York') < 10
+                WHEN EXTRACT(HOUR FROM entry_time) = 10
+                     AND EXTRACT(MINUTE FROM entry_time) < 10
                      THEN '10:00'
-                WHEN EXTRACT(HOUR FROM entry_time AT TIME ZONE 'America/New_York') = 10
-                     AND EXTRACT(MINUTE FROM entry_time AT TIME ZONE 'America/New_York') < 25
+                WHEN EXTRACT(HOUR FROM entry_time) = 10
+                     AND EXTRACT(MINUTE FROM entry_time) < 25
                      THEN '10:15'
-                WHEN EXTRACT(HOUR FROM entry_time AT TIME ZONE 'America/New_York') = 10
-                     AND EXTRACT(MINUTE FROM entry_time AT TIME ZONE 'America/New_York') < 40
+                WHEN EXTRACT(HOUR FROM entry_time) = 10
+                     AND EXTRACT(MINUTE FROM entry_time) < 40
                      THEN '10:30'
-                WHEN EXTRACT(HOUR FROM entry_time AT TIME ZONE 'America/New_York') = 10
-                     AND EXTRACT(MINUTE FROM entry_time AT TIME ZONE 'America/New_York') < 55
+                WHEN EXTRACT(HOUR FROM entry_time) = 10
+                     AND EXTRACT(MINUTE FROM entry_time) < 55
                      THEN '10:45'
                 ELSE '11:00'
             END AS cycle_time,
