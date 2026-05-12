@@ -325,7 +325,7 @@ with tabs[2]:
 
         st.dataframe(
             filtered[available].style
-            .applymap(color_pnl, subset=["pnl"])
+            .map(color_pnl, subset=["pnl"])
             .format({
                 "entry_price":         "${:.2f}",
                 "exit_price":          "${:.2f}",
