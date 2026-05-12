@@ -68,7 +68,7 @@ def get_open_trades() -> pd.DataFrame:
 
 def get_daily_performance() -> pd.DataFrame:
     return query("""
-        SELECT date, portfolio_value, pnl, total_trades,
+        SELECT date, portfolio_value, daily_pnl, total_trades,
                winning_trades, losing_trades
         FROM daily_performance
         ORDER BY date ASC
@@ -196,7 +196,7 @@ with tabs[0]:
     if not daily_df.empty:
         daily_df["date"] = pd.to_datetime(daily_df["date"])
         daily_df = daily_df.sort_values("date")
-        daily_df["cumulative_pnl"] = daily_df["pnl"].cumsum()
+        daily_df["cumulative_pnl"] = daily_df["daily_pnl"].cumsum()
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(
@@ -221,10 +221,10 @@ with tabs[0]:
 
         with col1:
             fig2 = go.Figure()
-            colors = ["#00d4aa" if v >= 0 else "#ff4444" for v in daily_df["pnl"]]
+            colors = ["#00d4aa" if v >= 0 else "#ff4444" for v in daily_df["daily_pnl"]]
             fig2.add_trace(go.Bar(
                 x=daily_df["date"],
-                y=daily_df["pnl"],
+                y=daily_df["daily_pnl"],
                 marker_color=colors,
                 name="Daily P&L",
             ))
