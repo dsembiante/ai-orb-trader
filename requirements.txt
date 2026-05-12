@@ -15,3 +15,5 @@ schedule
 psycopg2-binary
 sqlalchemy
 requests
+streamlit
+plotly
