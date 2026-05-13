@@ -246,15 +246,24 @@ class PositionMonitor:
                 except Exception as e:
                     log_error('dynamic_exit_vwap', ticker, str(e))
 
-            # Condition 4: Stagnant loss — 10+ min held, losing, MFE never reached +0.05%.
-            # Cuts dead-money positions that entered wrong and never showed upside.
-            if exit_reason is None and gain_pct is not None and minutes_held >= 10 and gain_pct < 0:
+            # Condition 4: Stagnant loss — losing, MFE never reached +0.05%.
+            # Window is 10 min for early cycles, 20 min for entries at or after 10:15 ET.
+            _stagnant_window = 10
+            if entry_time_str:
+                try:
+                    _edt = datetime.fromisoformat(entry_time_str)
+                    if _edt.hour > 10 or (_edt.hour == 10 and _edt.minute >= 15):
+                        _stagnant_window = 20
+                except Exception:
+                    pass
+            if exit_reason is None and gain_pct is not None and minutes_held >= _stagnant_window and gain_pct < 0:
                 mfe = self._peak_gain_pct.get(trade_id, 0.0)
                 if mfe <= 0.0005:
                     exit_reason = 'stagnant_loss_exit'
                     print(
                         f'[stagnant_loss_exit] {ticker} held {minutes_held:.0f}min, '
-                        f'MFE {mfe * 100:.2f}%, current {gain_pct * 100:.2f}% — cutting dead-money position'
+                        f'MFE {mfe * 100:.2f}%, current {gain_pct * 100:.2f}% — cutting dead-money position '
+                        f'(window={_stagnant_window}min)'
                     )
 
             # Update rolling price history for fast_reversal persistence check (keep last 5)
