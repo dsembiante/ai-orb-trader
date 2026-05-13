@@ -240,7 +240,7 @@ def run_gap_fade_ticker(
 
     _regime_mult = 1.0
     if market_regime == 'bull' and trade_str in ('short', 'sell_short'):
-        _regime_mult = 0.85
+        _regime_mult = 0.95
     elif market_regime == 'sideways':
         _regime_mult = 0.85
     elif market_regime == 'bear' and trade_str == 'buy':
@@ -388,7 +388,7 @@ def run_vwap_reversion_ticker(
 
     _regime_mult = 1.0
     if market_regime == 'bull' and trade_str in ('short', 'sell_short'):
-        _regime_mult = 0.85
+        _regime_mult = 0.95
     elif market_regime == 'sideways':
         _regime_mult = 0.85
     elif market_regime == 'bear' and trade_str == 'buy':
@@ -1288,7 +1288,7 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
                 # mutated at runtime. Multipliers compound: final = base * regime * vix.
                 _regime_mult = 1.0
                 if market_regime == 'bull' and trade_str in ('short', 'sell_short'):
-                    _regime_mult = 0.85  # shorting against bull market
+                    _regime_mult = 0.95  # shorting against bull market
                 elif market_regime in ('sideways',):
                     _regime_mult = 0.85  # neutral/uncertain direction
                 elif market_regime == 'bear' and trade_str == 'buy':
