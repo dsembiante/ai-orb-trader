@@ -280,7 +280,7 @@ with tabs[1]:
                 "position_size_usd": "${:,.2f}",
                 "confidence_at_entry": "{:.2f}",
                 "vix_at_entry":      "{:.1f}",
-            }),
+            }, na_rep="—"),
             use_container_width=True,
         )
     else:
@@ -408,7 +408,7 @@ with tabs[3]:
                 "total_pnl": "${:,.2f}",
                 "avg_pnl":   "${:,.2f}",
                 "win_rate":  "{:.1f}%",
-            }),
+            }, na_rep="—"),
             use_container_width=True,
         )
     else:
@@ -462,7 +462,7 @@ with tabs[4]:
                 "total_pnl": "${:,.2f}",
                 "avg_pnl":   "${:,.2f}",
                 "win_rate":  "{:.1f}%",
-            }),
+            }, na_rep="—"),
             use_container_width=True,
         )
     else:
@@ -517,7 +517,7 @@ with tabs[5]:
                 "total_pnl": "${:,.2f}",
                 "avg_pnl":   "${:,.2f}",
                 "win_rate":  "{:.1f}%",
-            }),
+            }, na_rep="—"),
             use_container_width=True,
         )
     else:
@@ -560,7 +560,7 @@ with tabs[6]:
                 "avg_pnl":        "${:,.2f}",
                 "win_rate":       "{:.1f}%",
                 "avg_confidence": "{:.3f}",
-            }),
+            }, na_rep="—"),
             use_container_width=True,
         )
     else:
