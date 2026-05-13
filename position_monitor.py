@@ -61,16 +61,14 @@ class PositionMonitor:
 
         live_positions = {p['ticker'] for p in self.executor.get_open_positions()}
 
-        from datetime import datetime, timezone
+        from datetime import datetime
         for trade in open_trades:
             ticker = trade['ticker']
             if ticker in live_positions:
                 continue  # Position still open — nothing to reconcile
 
             entry_dt = datetime.fromisoformat(trade['entry_time'])
-            if entry_dt.tzinfo is None:
-                entry_dt = entry_dt.replace(tzinfo=timezone.utc)
-            seconds_held = (datetime.now(timezone.utc) - entry_dt).total_seconds()
+            seconds_held = (datetime.now() - entry_dt).total_seconds()
             if seconds_held < 60:
                 continue  # Too new — skip reconciliation
 
