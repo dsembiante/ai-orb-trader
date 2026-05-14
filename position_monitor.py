@@ -566,6 +566,16 @@ class PositionMonitor:
                 self.executor.client.close_position(ticker)
                 time.sleep(2)
                 exit_price = self.executor.get_filled_exit_price(ticker)
+                for _retry in range(3):
+                    if exit_price is not None:
+                        break
+                    time.sleep(2)
+                    exit_price = self.executor.get_filled_exit_price(ticker)
+                if exit_price is None:
+                    print(
+                        f'[orb_close] {ticker} — exit price unavailable after 3 retries, '
+                        f'DB record will need manual update'
+                    )
 
                 price_str = f'${exit_price:.2f}' if exit_price else 'unknown'
                 print(f'[orb_close] {ticker} closed at {price_str}')
