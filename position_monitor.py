@@ -73,7 +73,17 @@ class PositionMonitor:
                 continue  # Too new — skip reconciliation
 
             # Position gone from Alpaca — bracket leg fired or external close
-            exit_price  = self.executor.get_filled_exit_price(ticker)
+            exit_price = self.executor.get_filled_exit_price(ticker)
+            for _retry in range(3):
+                if exit_price is not None:
+                    break
+                time.sleep(2)
+                exit_price = self.executor.get_filled_exit_price(ticker)
+            if exit_price is None:
+                print(
+                    f'[reconcile_bracket_exits] {ticker} — exit price unavailable after 3 retries, '
+                    f'DB record will need manual update'
+                )
             entry_price = trade.get('entry_price')
             take_profit = trade.get('take_profit_price')
             stop_loss   = trade.get('stop_loss_price')
@@ -274,8 +284,22 @@ class PositionMonitor:
             if exit_reason:
                 try:
                     self.executor.close_position(ticker, trade_type)
+                except Exception as e:
+                    log_error('dynamic_exit', ticker, str(e))
+                    continue
+                time.sleep(2)
+                exit_price = self.executor.get_filled_exit_price(ticker)
+                for _retry in range(3):
+                    if exit_price is not None:
+                        break
                     time.sleep(2)
                     exit_price = self.executor.get_filled_exit_price(ticker)
+                if exit_price is None:
+                    print(
+                        f'[dynamic_exit] {ticker} — exit price unavailable after 3 retries, '
+                        f'DB record will need manual update'
+                    )
+                try:
                     self.db.update_trade_status(
                         trade['trade_id'],
                         status='closed',
@@ -506,15 +530,23 @@ class PositionMonitor:
                 f"({days_held} days). Closing."
             )
             try:
-                # Place a market close order via Alpaca
                 self.executor.close_position(trade['ticker'], trade['trade_type'])
-
-                # Wait for Alpaca to record the fill before querying order history
+            except Exception as e:
+                log_error('position_monitor', trade['ticker'], str(e))
+                return
+            time.sleep(2)
+            exit_price = self.executor.get_filled_exit_price(trade['ticker'])
+            for _retry in range(3):
+                if exit_price is not None:
+                    break
                 time.sleep(2)
                 exit_price = self.executor.get_filled_exit_price(trade['ticker'])
-
-                # Update the database record so the dashboard and reports
-                # reflect the correct exit reason for post-trade analysis
+            if exit_price is None:
+                print(
+                    f'[position_monitor] {trade["ticker"]} — exit price unavailable after 3 retries, '
+                    f'DB record will need manual update'
+                )
+            try:
                 self.db.update_trade_status(
                     trade['trade_id'],
                     status='closed',
@@ -522,8 +554,6 @@ class PositionMonitor:
                     exit_price=exit_price,
                 )
             except Exception as e:
-                # Log and continue — a failure on one position should not
-                # prevent the monitor from checking the remaining positions
                 log_error('position_monitor', trade['ticker'], str(e))
 
     # ── ORB Hard Close ────────────────────────────────────────────────────────
