@@ -975,6 +975,18 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
             if not momentum_entries_open or gap_fade_traded:
                 continue
 
+            # ── Primary Cycle ORB Score Gate ──────────────────────────────────
+            # The primary 10:00 ET cycle (internal cycle_time='09:45') requires
+            # at least one confirmatory signal. abs(orb_score) == 0 means the
+            # ORB direction is neutral or uncalculable — no edge to trade.
+            # Extended cycles (10:15–11:00) are exempt and may trade orb_score=0.
+            if cycle_time == '09:45' and abs(market_data.orb_score or 0) < 1:
+                print(
+                    f'⏭️ {ticker} — primary cycle requires orb_score >= 1 '
+                    f'(current: {market_data.orb_score}), skipping'
+                )
+                continue
+
             # ── Market Data Summary ───────────────────────────────────────────
             # Pre-format all signals into a single string injected into each
             # agent prompt. Inline formatting handles None values gracefully
