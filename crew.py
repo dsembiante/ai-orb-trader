@@ -1042,7 +1042,7 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
             # ── Counter-Trend Short Filter ────────────────────────────────────
             # Count how many of 3 signals suggest this is an uptrending stock.
             # 2+ strikes: inject a prompt warning requiring 4/4 bearish signals
-            # and 0.92 confidence before a SHORT is approved. A post-crew hard
+            # and 0.88 confidence before a SHORT is approved. A post-crew hard
             # gate enforces the confidence floor even if the LLM ignores the prompt.
             _counter_trend_strikes = sum([
                 bool(market_data.gap_pct and market_data.gap_pct > 0.5),
@@ -1059,7 +1059,7 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
                     f'\n\n⚠️ COUNTER-TREND SHORT ALERT ({_counter_trend_strikes}/3 signals: '
                     f'{", ".join(_ct_detail)}): This stock shows uptrend characteristics. '
                     f'If recommending SHORT, require ALL 4/4 bearish signals confirmed '
-                    f'and confidence >= 0.92. If either condition is not met, set execute=false.'
+                    f'and confidence >= 0.88. If either condition is not met, set execute=false.'
                 )
 
             # ── Task Creation ─────────────────────────────────────────────────
@@ -1194,13 +1194,13 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
 
             # ── Counter-Trend Short Hard Gate ─────────────────────────────────
             # Post-crew safety net: if the LLM ignored the prompt injection above,
-            # enforce the 0.92 confidence floor deterministically before execution.
+            # enforce the 0.88 confidence floor deterministically before execution.
             if decision.execute and _counter_trend_strikes >= 2:
                 _dt = str(getattr(decision.trade_type, 'value', decision.trade_type) or '').lower()
-                if _dt == 'short' and (decision.confidence or 0.0) < 0.92:
+                if _dt == 'short' and (decision.confidence or 0.0) < 0.88:
                     print(
                         f'[short_filter] {ticker} — blocked: {_counter_trend_strikes}/3 '
-                        f'counter-trend signals, confidence {decision.confidence:.2f} < 0.92 required'
+                        f'counter-trend signals, confidence {decision.confidence:.2f} < 0.88 required'
                     )
                     decision.execute = False
 

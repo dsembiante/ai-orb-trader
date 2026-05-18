@@ -257,12 +257,16 @@ class PositionMonitor:
                     log_error('dynamic_exit_vwap', ticker, str(e))
 
             # Condition 4: Stagnant loss — losing, MFE never reached +0.05%.
-            # Window is 10 min for early cycles, 20 min for entries at or after 10:15 ET.
+            # Window is 10 min for primary cycle entries, 20 min for extended cycles
+            # (10:15 ET or later) or primary cycle entries with abs(orb_score) >= 2.
             _stagnant_window = 10
             if entry_time_str:
                 try:
                     _edt = datetime.fromisoformat(entry_time_str)
-                    if _edt.hour > 10 or (_edt.hour == 10 and _edt.minute >= 15):
+                    _is_extended = _edt.hour > 10 or (_edt.hour == 10 and _edt.minute >= 15)
+                    _orb_score   = trade.get('orb_score')
+                    _strong_orb  = _orb_score is not None and abs(_orb_score) >= 2
+                    if _is_extended or _strong_orb:
                         _stagnant_window = 20
                 except Exception:
                     pass
