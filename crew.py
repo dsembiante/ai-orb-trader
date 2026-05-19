@@ -97,6 +97,121 @@ def _get_2bar_momentum(ticker: str) -> float | None:
         return None
 
 
+def _compute_exhaustion_metrics(
+    ticker: str,
+    entry_price: float,
+    market_data,
+) -> dict:
+    """
+    Compute entry-time diagnostic metrics for the exhaustion-move filter dataset.
+    Logging-only — no trade logic reads these fields. Any computation failure
+    returns None for that metric rather than raising, so a data error never
+    blocks the DB insert.
+
+    Metrics 1-3 are zero-cost (derived from market_data already in scope).
+    Metrics 4-7 require one Alpaca 1-min bar fetch; called after execute_trade()
+    so this cannot delay order submission.
+    """
+    metrics = {
+        'distance_from_vwap_pct':     None,
+        'distance_from_orb_high_pct': None,
+        'distance_from_orb_low_pct':  None,
+        'minutes_since_orb_breakout': None,
+        'last_3_bars_velocity_pct':   None,
+        'last_bar_range_pct':         None,
+        'price_vs_recent_high_pct':   None,
+    }
+
+    # Metrics 1-3: zero cost — data already fetched by collect()
+    try:
+        if market_data.vwap and market_data.vwap > 0:
+            metrics['distance_from_vwap_pct'] = round(
+                (entry_price - market_data.vwap) / market_data.vwap * 100, 4)
+    except Exception:
+        pass
+    try:
+        if market_data.orb_high and market_data.orb_high > 0:
+            metrics['distance_from_orb_high_pct'] = round(
+                (entry_price - market_data.orb_high) / market_data.orb_high * 100, 4)
+    except Exception:
+        pass
+    try:
+        if market_data.orb_low and market_data.orb_low > 0:
+            metrics['distance_from_orb_low_pct'] = round(
+                (entry_price - market_data.orb_low) / market_data.orb_low * 100, 4)
+    except Exception:
+        pass
+
+    # Metrics 4-7: single 1-min Alpaca fetch — ~300-500 ms, post-fill only
+    try:
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from datetime import timedelta
+        import pandas as pd
+
+        raw = collector.alpaca.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=ticker,
+            timeframe=TimeFrame.Minute,
+            start=datetime.now() - timedelta(minutes=70),
+        ))
+        df = raw.df.reset_index()
+        if df is None or df.empty:
+            return metrics
+
+        ts = pd.to_datetime(df['timestamp'])
+        if ts.dt.tz is None:
+            ts = ts.dt.tz_localize('UTC')
+        df['timestamp'] = ts.dt.tz_convert('America/New_York')
+        df = df.set_index('timestamp').between_time('09:30', '16:00')
+        if len(df) < 4:
+            return metrics
+
+        # Metric 5: signed % move across the 3 most recent bar intervals
+        close_base = float(df['close'].iloc[-4])
+        close_now  = float(df['close'].iloc[-1])
+        if close_base > 0:
+            metrics['last_3_bars_velocity_pct'] = round(
+                (close_now - close_base) / close_base * 100, 4)
+
+        # Metric 6: range of the most recent completed bar
+        last_low  = float(df['low'].iloc[-1])
+        last_high = float(df['high'].iloc[-1])
+        if last_low > 0:
+            metrics['last_bar_range_pct'] = round(
+                (last_high - last_low) / last_low * 100, 4)
+
+        # Metric 4: minutes from first ORB-crossing bar to the entry bar
+        orb_high = market_data.orb_high
+        orb_low  = market_data.orb_low
+        is_long  = market_data.orb_direction == 'long'
+        is_short = market_data.orb_direction == 'short'
+        if is_long and orb_high:
+            crossers = df[df['high'] > orb_high]
+        elif is_short and orb_low:
+            crossers = df[df['low'] < orb_low]
+        else:
+            crossers = pd.DataFrame()
+        if not crossers.empty:
+            delta_secs = (df.index[-1] - crossers.index[0]).total_seconds()
+            metrics['minutes_since_orb_breakout'] = max(0, int(delta_secs / 60))
+
+        # Metric 7: entry vs. 30-min sliding-window extreme
+        # Positive for longs = entry is above recent high (extended move);
+        # negative = room still exists between entry and the recent extreme.
+        cutoff = df.index[-1] - timedelta(minutes=30)
+        recent = df[df.index >= cutoff]
+        if not recent.empty:
+            extreme = float(recent['high'].max() if is_long else recent['low'].min())
+            if extreme > 0:
+                metrics['price_vs_recent_high_pct'] = round(
+                    (entry_price - extreme) / extreme * 100, 4)
+
+    except Exception as e:
+        log_error('exhaustion_metrics', ticker, str(e))
+
+    return metrics
+
+
 # ── Module-Level Singletons ───────────────────────────────────────────────────
 # Instantiated once at import time and reused for every ticker across all
 # scheduler cycles within the process lifetime. This avoids opening new
@@ -292,6 +407,7 @@ def run_gap_fade_ticker(
                     break
         except Exception:
             pass
+        _exh = _compute_exhaustion_metrics(ticker, actual_entry_price, market_data)
         trade_record = {
             'trade_id':               str(uuid.uuid4()),
             'ticker':                 ticker,
@@ -319,6 +435,13 @@ def run_gap_fade_ticker(
             'entry_time':             datetime.now().isoformat(),
             'exit_time':              None,
             'strategy_used':          'gap_fade',
+            'distance_from_vwap_pct':     _exh['distance_from_vwap_pct'],
+            'distance_from_orb_high_pct': _exh['distance_from_orb_high_pct'],
+            'distance_from_orb_low_pct':  _exh['distance_from_orb_low_pct'],
+            'minutes_since_orb_breakout': _exh['minutes_since_orb_breakout'],
+            'last_3_bars_velocity_pct':   _exh['last_3_bars_velocity_pct'],
+            'last_bar_range_pct':         _exh['last_bar_range_pct'],
+            'price_vs_recent_high_pct':   _exh['price_vs_recent_high_pct'],
         }
         try:
             db.insert_trade(trade_record)
@@ -440,6 +563,7 @@ def run_vwap_reversion_ticker(
                     break
         except Exception:
             pass
+        _exh = _compute_exhaustion_metrics(ticker, actual_entry_price, market_data)
         trade_record = {
             'trade_id':               str(uuid.uuid4()),
             'ticker':                 ticker,
@@ -466,6 +590,13 @@ def run_vwap_reversion_ticker(
             'atr_pct':                market_data.atr_pct,
             'entry_time':             datetime.now().isoformat(),
             'exit_time':              None,
+            'distance_from_vwap_pct':     _exh['distance_from_vwap_pct'],
+            'distance_from_orb_high_pct': _exh['distance_from_orb_high_pct'],
+            'distance_from_orb_low_pct':  _exh['distance_from_orb_low_pct'],
+            'minutes_since_orb_breakout': _exh['minutes_since_orb_breakout'],
+            'last_3_bars_velocity_pct':   _exh['last_3_bars_velocity_pct'],
+            'last_bar_range_pct':         _exh['last_bar_range_pct'],
+            'price_vs_recent_high_pct':   _exh['price_vs_recent_high_pct'],
         }
         try:
             db.insert_trade(trade_record)
@@ -1461,6 +1592,7 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
                     # Build the full trade record for both SQLite and the JSON journal.
                     # trade_id is a UUID generated here rather than by the database so
                     # it can be referenced in logs before the DB write completes.
+                    _exh = _compute_exhaustion_metrics(ticker, actual_entry_price, market_data)
                     trade_record = {
                         'trade_id':               str(uuid.uuid4()),
                         'ticker':                 ticker,
@@ -1493,6 +1625,13 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
                         'orb_direction':          market_data.orb_direction,
                         'gap_pct':                market_data.gap_pct,
                         'exit_time':              None,       # Populated at close
+                        'distance_from_vwap_pct':     _exh['distance_from_vwap_pct'],
+                        'distance_from_orb_high_pct': _exh['distance_from_orb_high_pct'],
+                        'distance_from_orb_low_pct':  _exh['distance_from_orb_low_pct'],
+                        'minutes_since_orb_breakout': _exh['minutes_since_orb_breakout'],
+                        'last_3_bars_velocity_pct':   _exh['last_3_bars_velocity_pct'],
+                        'last_bar_range_pct':         _exh['last_bar_range_pct'],
+                        'price_vs_recent_high_pct':   _exh['price_vs_recent_high_pct'],
                     }
 
                     # Write to both persistence layers — SQLite for querying,
