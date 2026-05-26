@@ -97,6 +97,41 @@ def _get_2bar_momentum(ticker: str) -> float | None:
         return None
 
 
+def _compute_3bar_velocity(ticker: str) -> float | None:
+    """
+    Signed % move across the 3 most recent 1-minute bar intervals.
+    (close[-1] - close[-4]) / close[-4] * 100 — same window as last_3_bars_velocity_pct.
+    Returns None on any fetch or data error.
+    """
+    try:
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from datetime import timedelta
+        import pandas as pd
+        raw = collector.alpaca.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=ticker,
+            timeframe=TimeFrame.Minute,
+            start=datetime.now() - timedelta(minutes=70),
+        ))
+        df = raw.df.reset_index()
+        if df is None or df.empty:
+            return None
+        ts = pd.to_datetime(df['timestamp'])
+        if ts.dt.tz is None:
+            ts = ts.dt.tz_localize('UTC')
+        df['timestamp'] = ts.dt.tz_convert('America/New_York')
+        df = df.set_index('timestamp').between_time('09:30', '16:00')
+        if len(df) < 4:
+            return None
+        close_base = float(df['close'].iloc[-4])
+        close_now  = float(df['close'].iloc[-1])
+        if close_base <= 0:
+            return None
+        return round((close_now - close_base) / close_base * 100, 4)
+    except Exception:
+        return None
+
+
 def _compute_exhaustion_metrics(
     ticker: str,
     entry_price: float,
@@ -120,6 +155,7 @@ def _compute_exhaustion_metrics(
         'last_3_bars_velocity_pct':   None,
         'last_bar_range_pct':         None,
         'price_vs_recent_high_pct':   None,
+        'spy_3_bars_velocity_pct':    None,
     }
 
     # Metrics 1-3: zero cost — data already fetched by collect()
@@ -172,6 +208,8 @@ def _compute_exhaustion_metrics(
         if close_base > 0:
             metrics['last_3_bars_velocity_pct'] = round(
                 (close_now - close_base) / close_base * 100, 4)
+
+        metrics['spy_3_bars_velocity_pct'] = _compute_3bar_velocity('SPY')
 
         # Metric 6: range of the most recent completed bar
         last_low  = float(df['low'].iloc[-1])
@@ -442,6 +480,7 @@ def run_gap_fade_ticker(
             'last_3_bars_velocity_pct':   _exh['last_3_bars_velocity_pct'],
             'last_bar_range_pct':         _exh['last_bar_range_pct'],
             'price_vs_recent_high_pct':   _exh['price_vs_recent_high_pct'],
+            'spy_3_bars_velocity_pct':    _exh['spy_3_bars_velocity_pct'],
         }
         try:
             db.insert_trade(trade_record)
@@ -597,6 +636,7 @@ def run_vwap_reversion_ticker(
             'last_3_bars_velocity_pct':   _exh['last_3_bars_velocity_pct'],
             'last_bar_range_pct':         _exh['last_bar_range_pct'],
             'price_vs_recent_high_pct':   _exh['price_vs_recent_high_pct'],
+            'spy_3_bars_velocity_pct':    _exh['spy_3_bars_velocity_pct'],
         }
         try:
             db.insert_trade(trade_record)
@@ -1632,6 +1672,7 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
                         'last_3_bars_velocity_pct':   _exh['last_3_bars_velocity_pct'],
                         'last_bar_range_pct':         _exh['last_bar_range_pct'],
                         'price_vs_recent_high_pct':   _exh['price_vs_recent_high_pct'],
+                        'spy_3_bars_velocity_pct':    _exh['spy_3_bars_velocity_pct'],
                     }
 
                     # Write to both persistence layers — SQLite for querying,
