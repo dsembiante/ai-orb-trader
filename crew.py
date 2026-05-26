@@ -48,6 +48,10 @@ import uuid
 import yfinance as yf
 
 
+# ── Entry Filter Thresholds ──────────────────────────────────────────────────
+LATE_SHORT_VWAP_THRESHOLD = -0.50  # Block shorts already this far below VWAP (%)
+
+
 # ── Session Momentum Helpers ─────────────────────────────────────────────────
 
 def _get_session_phase(et_now: datetime) -> str:
@@ -1374,6 +1378,24 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
                         f'counter-trend signals, confidence {decision.confidence:.2f} < 0.88 required'
                     )
                     decision.execute = False
+
+            # ── Late-Short Exhaustion Hard Gate ──────────────────────────────────
+            # Block shorts where price is already extended below VWAP. Late shorts
+            # have poor R:R; the easy move has already happened and mean-reversion
+            # risk is elevated. Threshold tuned via LATE_SHORT_VWAP_THRESHOLD.
+            if decision.execute and market_data.vwap and market_data.current_price:
+                _dt = str(getattr(decision.trade_type, 'value', decision.trade_type) or '').lower()
+                if _dt in ('short', 'sell_short'):
+                    _vwap_dist = _get_vwap_margin_pct(market_data.current_price, market_data.vwap)
+                    if _vwap_dist < LATE_SHORT_VWAP_THRESHOLD:
+                        _msg = (
+                            f'[late_short_filter] {ticker} — BLOCKED: late-short exhaustion '
+                            f'(distance_from_vwap={_vwap_dist:.2f}%, '
+                            f'threshold={LATE_SHORT_VWAP_THRESHOLD:.2f}%)'
+                        )
+                        print(_msg)
+                        log_error('late_short_filter', ticker, _msg)
+                        decision.execute = False
 
             # ── Position Sizing & Execution ───────────────────────────────────
             if decision.execute and decision.trade_type:
