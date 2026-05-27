@@ -5,6 +5,7 @@ Two tables are maintained:
     trades             — One row per trade entry, updated in-place on exit.
     daily_performance  — One row per calendar day, written by the scheduler
                          at end-of-day for report generation.
+    blocked_trades     — One row per blocked entry, for retrospective analysis.
 
 PostgreSQL is used so both the scheduler service and the Streamlit dashboard
 service on Railway can share the same database. The connection string is read
@@ -118,6 +119,31 @@ class Database:
                     peak_value  REAL,
                     updated_at  TEXT
                 )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS blocked_trades (
+                    id                      SERIAL PRIMARY KEY,
+                    block_time              TIMESTAMP NOT NULL DEFAULT NOW(),
+                    ticker                  TEXT NOT NULL,
+                    trade_type              TEXT NOT NULL,
+                    filter_name             TEXT NOT NULL,
+                    confidence              NUMERIC,
+                    distance_from_vwap_pct  NUMERIC,
+                    spy_3_bars_velocity_pct NUMERIC,
+                    would_be_entry_price    NUMERIC,
+                    strategy_used           TEXT,
+                    price_at_1130           NUMERIC,
+                    hypothetical_pnl_pct    NUMERIC,
+                    backfill_completed_at   TIMESTAMP
+                )
+            ''')
+            cur.execute('''
+                CREATE INDEX IF NOT EXISTS idx_blocked_trades_block_time
+                ON blocked_trades (block_time)
+            ''')
+            cur.execute('''
+                CREATE INDEX IF NOT EXISTS idx_blocked_trades_ticker
+                ON blocked_trades (ticker)
             ''')
         self.conn.commit()
 
