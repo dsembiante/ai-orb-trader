@@ -1395,6 +1395,31 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
                         )
                         print(_msg)
                         log_error('late_short_filter', ticker, _msg)
+                        try:
+                            with db.conn.cursor() as _cur:
+                                _cur.execute("""
+                                    INSERT INTO blocked_trades
+                                        (ticker, trade_type, filter_name, confidence,
+                                         distance_from_vwap_pct, spy_3_bars_velocity_pct,
+                                         would_be_entry_price, strategy_used)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                """, (
+                                    ticker,
+                                    _dt,
+                                    'late_short_filter',
+                                    decision.confidence,
+                                    _vwap_dist,
+                                    _compute_3bar_velocity('SPY'),
+                                    decision.entry_price or market_data.current_price,
+                                    strategy_used,
+                                ))
+                            db.conn.commit()
+                        except Exception as _e:
+                            try:
+                                db.conn.rollback()
+                            except Exception:
+                                pass
+                            log_error('blocked_trades_insert_fail', ticker, str(_e))
                         decision.execute = False
 
             # ── Position Sizing & Execution ───────────────────────────────────
