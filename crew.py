@@ -50,6 +50,7 @@ import yfinance as yf
 
 # ── Entry Filter Thresholds ──────────────────────────────────────────────────
 LATE_SHORT_VWAP_THRESHOLD = -0.50  # Block shorts already this far below VWAP (%)
+BLOCK_MOMENTUM_SHORTS = True       # Experiment: disable all momentum short entries
 
 
 # ── Session Momentum Helpers ─────────────────────────────────────────────────
@@ -1377,6 +1378,49 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
                         f'[short_filter] {ticker} — blocked: {_counter_trend_strikes}/3 '
                         f'counter-trend signals, confidence {decision.confidence:.2f} < 0.88 required'
                     )
+                    decision.execute = False
+
+            # ── Momentum Short Hard Block ─────────────────────────────────────────
+            # Experiment: block every momentum short to test whether removing them
+            # entirely improves net P&L. Toggle BLOCK_MOMENTUM_SHORTS at module level.
+            if BLOCK_MOMENTUM_SHORTS and decision.execute:
+                _dt = str(getattr(decision.trade_type, 'value', decision.trade_type) or '').lower()
+                if strategy_used == 'momentum' and _dt in ('short', 'sell_short'):
+                    _vwap_dist = (
+                        _get_vwap_margin_pct(market_data.current_price, market_data.vwap)
+                        if market_data.vwap and market_data.current_price else 0.0
+                    )
+                    _msg = (
+                        f'[momentum_short_block] {ticker} — BLOCKED: all momentum shorts disabled '
+                        f'(experiment, vwap_dist={_vwap_dist:.2f}%)'
+                    )
+                    print(_msg)
+                    log_error('momentum_short_block', ticker, _msg)
+                    try:
+                        with db.conn.cursor() as _cur:
+                            _cur.execute("""
+                                INSERT INTO blocked_trades
+                                    (ticker, trade_type, filter_name, confidence,
+                                     distance_from_vwap_pct, spy_3_bars_velocity_pct,
+                                     would_be_entry_price, strategy_used)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (
+                                ticker,
+                                _dt,
+                                'momentum_short_block',
+                                decision.confidence,
+                                _vwap_dist,
+                                _compute_3bar_velocity('SPY'),
+                                decision.entry_price or market_data.current_price,
+                                strategy_used,
+                            ))
+                        db.conn.commit()
+                    except Exception as _e:
+                        try:
+                            db.conn.rollback()
+                        except Exception:
+                            pass
+                        log_error('blocked_trades_insert_fail', ticker, str(_e))
                     decision.execute = False
 
             # ── Late-Short Exhaustion Hard Gate ──────────────────────────────────
