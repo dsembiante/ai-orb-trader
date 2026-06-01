@@ -344,6 +344,31 @@ class Database:
         except Exception:
             self.conn.rollback()
 
+        # ── Bar-based post-close MFE/MAE columns (Option-B, observation-only) ─
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'trades' AND column_name = 'max_favorable_excursion_bar_pct'
+                """)
+                if not cur.fetchone():
+                    cur.execute("ALTER TABLE trades ADD COLUMN max_favorable_excursion_bar_pct REAL")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'trades' AND column_name = 'max_adverse_excursion_bar_pct'
+                """)
+                if not cur.fetchone():
+                    cur.execute("ALTER TABLE trades ADD COLUMN max_adverse_excursion_bar_pct REAL")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+
     # ── Write Operations ──────────────────────────────────────────────────────
 
     def insert_trade(self, trade: dict):
@@ -412,6 +437,9 @@ class Database:
                  exit_time_val, trade_id)
             )
         self.conn.commit()
+
+        if status == 'closed':
+            self.compute_and_store_excursion(trade_id)
 
     def upgrade_trade_to_swing(self, trade_id):
         """
@@ -513,6 +541,127 @@ class Database:
                 (mfe_pct, mae_pct, trade_id),
             )
         self.conn.commit()
+
+    def compute_and_store_excursion(self, trade_id: str) -> None:
+        """
+        Fetch 1-minute Alpaca bars for the closed trade's hold window and write
+        bar-based MFE/MAE into max_favorable_excursion_bar_pct and
+        max_adverse_excursion_bar_pct.
+
+        Observation-only: never raises, never affects any exit decision.
+        Stored as signed fractions: MFE >= 0, MAE <= 0 (0.015 = 1.5% favorable,
+        -0.012 = 1.2% adverse). Separate from the live-tracked
+        max_favorable_excursion_pct / max_adverse_excursion_pct columns.
+        """
+        try:
+            # ── Load trade fields ─────────────────────────────────────────────
+            with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    'SELECT ticker, trade_type, entry_price, entry_time, exit_time '
+                    'FROM trades WHERE trade_id = %s',
+                    (trade_id,)
+                )
+                row = cur.fetchone()
+
+            if not row:
+                return
+            ticker      = row['ticker']
+            trade_type  = row['trade_type'] or 'buy'
+            entry_price = row['entry_price']
+            entry_time  = row['entry_time']
+            exit_time   = row['exit_time']
+
+            if not all([ticker, entry_price, entry_time, exit_time]):
+                return
+
+            # ── Parse times, attach UTC if naive ─────────────────────────────
+            from datetime import timezone, timedelta
+            UTC = timezone.utc
+            try:
+                entry_dt = datetime.fromisoformat(entry_time)
+                exit_dt  = datetime.fromisoformat(exit_time)
+            except Exception:
+                return
+            if entry_dt.tzinfo is None:
+                entry_dt = entry_dt.replace(tzinfo=UTC)
+            if exit_dt.tzinfo is None:
+                exit_dt  = exit_dt.replace(tzinfo=UTC)
+
+            # ── Fetch 1-minute bars ───────────────────────────────────────────
+            try:
+                from alpaca.data.historical import StockHistoricalDataClient
+                from alpaca.data.requests import StockBarsRequest
+                from alpaca.data.timeframe import TimeFrame
+
+                alpaca_client = StockHistoricalDataClient(
+                    config.alpaca_api_key, config.alpaca_secret_key
+                )
+                bars = alpaca_client.get_stock_bars(StockBarsRequest(
+                    symbol_or_symbols=ticker,
+                    timeframe=TimeFrame.Minute,
+                    start=entry_dt - timedelta(minutes=2),
+                    end=exit_dt   + timedelta(minutes=2),
+                ))
+                df = bars.df.reset_index()
+            except Exception as e:
+                try:
+                    from logger import log_error
+                    log_error('excursion_bar_fetch', ticker, str(e))
+                except Exception:
+                    pass
+                return
+
+            if df.empty:
+                return
+
+            # ── Align timestamps to UTC and filter to hold window ─────────────
+            ts = df['timestamp']
+            if hasattr(ts.dt, 'tz') and ts.dt.tz is None:
+                ts = ts.dt.tz_localize('UTC')
+            df = df.assign(_ts_utc=ts)
+            mask = (
+                (df['_ts_utc'] >= entry_dt - timedelta(minutes=1)) &
+                (df['_ts_utc'] <= exit_dt  + timedelta(minutes=1))
+            )
+            df = df[mask]
+            if df.empty:
+                return
+
+            # ── Compute sign-corrected MFE and MAE ───────────────────────────
+            max_high = float(df['high'].max())
+            min_low  = float(df['low'].min())
+            entry    = float(entry_price)
+            is_long  = trade_type.lower() in ('buy', 'long')
+
+            if is_long:
+                mfe = (max_high - entry) / entry   # positive when price rose
+                mae = (min_low  - entry) / entry   # negative when price fell
+            else:
+                mfe = (entry - min_low)  / entry   # positive when price fell
+                mae = (entry - max_high) / entry   # negative when price rose
+
+            mfe = max(mfe, 0.0)   # MFE cannot be negative
+            mae = min(mae, 0.0)   # MAE cannot be positive
+
+            # ── Persist — only the two new _bar_pct columns ──────────────────
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    'UPDATE trades SET max_favorable_excursion_bar_pct = %s, '
+                    'max_adverse_excursion_bar_pct = %s WHERE trade_id = %s',
+                    (mfe, mae, trade_id)
+                )
+            self.conn.commit()
+
+        except Exception as e:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            try:
+                from logger import log_error
+                log_error('compute_and_store_excursion', '', str(e))
+            except Exception:
+                pass
 
     def get_last_closed_trade(self, ticker: str) -> dict | None:
         """
