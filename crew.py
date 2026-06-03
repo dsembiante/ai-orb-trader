@@ -738,7 +738,7 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
     # Each strategy has its own active window. The per-ticker loop runs as long
     # as at least one strategy has an open window; the momentum pipeline gets a
     # continue gate inside the loop when its own window has closed.
-    momentum_entries_open = et_now.time() < time(11, 30)
+    momentum_entries_open = et_now.time() < time(11, 0)
     gap_fade_entries_open = et_now.time() < time(10, 45)
     vwap_reversion_open   = (
         config.vwap_reversion_enabled and
@@ -747,7 +747,7 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
 
     if not momentum_entries_open and not vwap_reversion_open:
         if et_now.time() < time(12, 0):
-            print(f'⛔ Past 11:30 AM ET — entries closed, monitoring positions only')
+            print(f'⛔ Past 11:00 AM ET — entries closed, monitoring positions only')
         log_run(run_log)
         return
 

@@ -576,8 +576,8 @@ with tabs[7]:
         st.markdown("**Strategy**")
         st.code("""
 System:     V2 ORB Multi-Strategy
-Cycles:     9:45 | 10:00 | 10:15 | 10:30 | 10:45 | 11:00 ET
-Hard Close: 11:30 ET
+Cycles:     9:45 | 10:00 | 10:15 | 10:30 | 10:45 ET
+Hard Close: 11:00 ET
 Strategies: ORB (9:45-10:00) | Momentum (all) | Gap Fade (9:45-10:15)
 Max Pos:    8 simultaneous
         """)
@@ -597,7 +597,7 @@ Confidence:    Min 0.75 to trade
 2. protective_stop       — ATR-based bracket stop (0.75%-1.5%)
 3. vwap_cross_exit       — Crosses VWAP against position after 15min
 4. stagnant_loss_exit    — Losing after 10min, never reached +0.05%
-5. orb_time_exit         — Hard close 11:30 ET (primary profit capture)
+5. orb_time_exit         — Hard close 11:00 ET (primary profit capture)
 6. bracket_stop_loss     — Alpaca bracket fires independently
     """)
 

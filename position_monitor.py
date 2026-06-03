@@ -1,13 +1,13 @@
 """
 position_monitor.py — V2 ORB protective exit enforcement.
 
-Runs on every 1-minute monitor cycle (9:45–11:30 ET) to check open
+Runs on every 1-minute monitor cycle (9:45–10:59 ET) to check open
 positions against V2 exit conditions:
 
 1. Protective stop: 2% adverse move from entry — closes immediately.
 2. VWAP cross against direction after 15+ minutes held — closes on reversal.
 3. Hold period expiry (max_hold_days) — multi-day safety net via _check_hold_expiry.
-4. Hard time-based close at 11:30 ET (10:30 CT) via close_all_positions_orb().
+4. Hard time-based close at 11:00 ET (10:00 CT) via close_all_positions_orb().
 
 Bracket orders placed at entry via trade_executor.py act as a parallel
 stop-loss; the protective stop here may fire first for intraday moves.
@@ -130,7 +130,7 @@ class PositionMonitor:
         3. VWAP cross against direction after 15+ minutes held.
         4. Stagnant loss: 10+ min held, currently losing, MFE never exceeded +0.05%.
 
-        The hard time-based close at 11:30 ET (10:30 CT) is handled by
+        The hard time-based close at 11:00 ET (10:00 CT) is handled by
         close_all_positions_orb(), called directly from the scheduler.
         """
         open_trades = self.db.get_open_trades()
@@ -569,7 +569,7 @@ class PositionMonitor:
         Uses Alpaca's live position list as the source of truth — closes ALL
         open Alpaca positions regardless of DB state. Exit reason is recorded
         as 'orb_time_exit' for every closure. Called by run_orb_hard_close()
-        in scheduler.py at 11:30 ET (10:30 CT) each trading day.
+        in scheduler.py at 11:00 ET (10:00 CT) each trading day.
         """
         live_positions = {p['ticker']: p for p in self.executor.get_open_positions()}
 

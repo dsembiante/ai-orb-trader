@@ -3,8 +3,8 @@ scheduler.py — V2 ORB strategy cycle runner for Railway deployment.
 
 Fires one full trading cycle per day at 10:00 ET (9:00 CT), immediately
 after the 30-minute opening range (9:30–10:00 ET) has formed. A 1-minute
-position monitor runs from 10:00–11:30 ET for protective exits only.
-All positions are force-closed at 11:30 ET (10:30 CT) with
+position monitor runs from 10:00–10:59 ET for protective exits only.
+All positions are force-closed at 11:00 ET (10:00 CT) with
 exit_reason='orb_time_exit'.
 
 Run locally:
@@ -137,7 +137,7 @@ def run_orb_cycle_timed(cycle_time: str):
 
 def run_orb_hard_close():
     """
-    Hard close at 11:30 ET (10:30 CT) — force-closes ALL open positions.
+    Hard close at 11:00 ET (10:00 CT) — force-closes ALL open positions.
 
     Calls PositionMonitor.close_all_positions_orb() which records every
     closure with exit_reason='orb_time_exit'. This is the primary exit
@@ -145,7 +145,7 @@ def run_orb_hard_close():
     """
     if not market_is_open():
         return
-    print(f'{datetime.now()} — ORB hard close: force-closing all positions (10:30 CT)')
+    print(f'{datetime.now()} — ORB hard close: force-closing all positions (10:00 CT)')
     try:
         from trade_executor import TradeExecutor
         monitor = PositionMonitor(TradeExecutor())
@@ -158,8 +158,8 @@ def run_monitor_check():
     """
     1-minute protective exit check — no entry evaluation, no Groq calls.
 
-    Runs every minute from 9:45–11:29 ET. Catches 2% adverse-move stops
-    and VWAP crosses against direction before the 11:30 ET hard close.
+    Runs every minute from 9:45–10:59 ET. Catches 2% adverse-move stops
+    and VWAP crosses against direction before the 11:00 ET hard close.
     """
     if not market_is_open():
         return
@@ -190,42 +190,42 @@ def end_of_day():
 
 # ── V2 Schedule ───────────────────────────────────────────────────────────────
 # All times are ET (Railway: TZ=America/New_York).
-# Primary ORB cycle: 10:00 ET. Extended cycles: 10:15–11:00 ET (flag-gated).
-# Monitor window: 10:00–11:29 ET (1-min cadence, protective exits only).
-# Hard close: 11:30 ET (10:30 CT). EOD report: 4:00 PM ET.
+# Primary ORB cycle: 10:00 ET. Extended cycles: 10:15–10:45 ET (flag-gated).
+# Monitor window: 10:00–10:59 ET (1-min cadence, protective exits only).
+# Hard close: 11:00 ET (10:00 CT). EOD report: 4:00 PM ET.
 
-print('V2 ORB scheduler starting — cycle: 10:00 ET | extended: 10:15–11:00 ET (flag-gated) | monitor: 10:00–11:30 ET | hard close: 11:30 ET')
+print('V2 ORB scheduler starting — cycle: 10:00 ET | extended: 10:15–10:45 ET (flag-gated) | monitor: 10:00–10:59 ET | hard close: 11:00 ET')
 
 # Primary ORB entry cycle (30-min range: 9:30–9:59 ET)
 schedule.every().day.at('10:00').do(run_orb_cycle)
 
 # Extended ORB entry cycles — no-op unless ORB_EXTENDED_ENABLED=true
+# Last entry cycle is 10:45; 11:00 removed — hard close fires at 11:00 ET
 schedule.every().day.at('10:15').do(run_orb_cycle_timed, '10:15')
 schedule.every().day.at('10:30').do(run_orb_cycle_timed, '10:30')
 schedule.every().day.at('10:45').do(run_orb_cycle_timed, '10:45')
-schedule.every().day.at('11:00').do(run_orb_cycle_timed, '11:00')
 
-# Hard close at 10:30 CT (11:30 ET)
-schedule.every().day.at('11:30').do(run_orb_hard_close)
+# Hard close at 10:00 CT (11:00 ET)
+schedule.every().day.at('11:00').do(run_orb_hard_close)
 
 # EOD report
 schedule.every().day.at('16:00').do(end_of_day)
 
-# 15-minute position monitor: 9:45–11:29 ET
+# 15-minute position monitor: 10:00–10:45 ET (hard close fires at 11:00 ET)
 if config.position_monitor_enabled:
     for _hour in range(9, 12):
         for _minute in range(0, 60, 15):
             if _hour == 9:
                 continue  # Before ORB cycle fires
-            if _hour == 11 and _minute >= 30:
-                continue  # Hard close handles 11:30 ET
+            if _hour == 11:
+                continue  # Hard close fires at 11:00 ET — no monitor at or after
             schedule.every().day.at(f'{_hour:02d}:{_minute:02d}').do(run_monitor_check)
 
 
 # ── Process Entrypoint ────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print('Trading scheduler started — cycle: 10:00 ET | extended: 10:15–11:00 ET (flag-gated) | monitor: 10:00–11:30 ET | hard close: 11:30 ET')
+    print('Trading scheduler started — cycle: 10:00 ET | extended: 10:15–10:45 ET (flag-gated) | monitor: 10:00–10:59 ET | hard close: 11:00 ET')
     while True:
         schedule.run_pending()
         time.sleep(30)
