@@ -168,16 +168,15 @@ class PositionSizer:
         """
         Calculate the take-profit price for a position.
 
-        For INTRADAY trades with a valid atr_pct, uses ATR-tiered fixed targets
-        that maintain a 2:1 reward-to-risk ratio relative to the stop loss tiers:
+        For INTRADAY trades with a valid atr_pct, uses ATR-tiered scalp targets:
 
-            ATR < 2.0% → 1.5% target  (2:1 on 0.75% stop)
-            ATR < 3.5% → 2.0% target  (2:1 on 1.00% stop)
-            ATR < 5.0% → 3.0% target  (2:1 on 1.50% stop)
-            ATR ≥ 5.0% → 5.0% target  (2:1 on 2.50% stop)
+            ATR < 2.0% → 0.40% target
+            ATR < 3.5% → 0.50% target
+            ATR < 5.0% → 0.60% target
+            ATR ≥ 5.0% → 0.70% target
 
         Falls back to config fixed percentages for non-intraday holds or when
-        ATR is unavailable (medium-tier default: 2.0%).
+        ATR is unavailable (intraday fallback: 0.40%).
 
         Args:
             entry:      Fill price at trade entry.
@@ -189,28 +188,39 @@ class PositionSizer:
         Returns:
             Take-profit price rounded to 2 decimal places.
         """
+        _bucket = None  # populated for [tp_tier] log when hold is intraday
         if hold == HoldPeriod.INTRADAY and atr_pct is not None and atr_pct > 0:
             if atr_pct < 2.0:
-                pct = 0.0150   # 1.5% — low-vol names  (2:1 on 0.75% stop)
+                pct = 0.0040   # 0.40% — low-vol names
+                _bucket = '<2.0%'
             elif atr_pct < 3.5:
-                pct = 0.0200   # 2.0% — med-vol names  (2:1 on 1.00% stop)
+                pct = 0.0050   # 0.50% — med-vol names
+                _bucket = '<3.5%'
             elif atr_pct < 5.0:
-                pct = 0.0300   # 3.0% — high-vol names (2:1 on 1.50% stop)
+                pct = 0.0060   # 0.60% — high-vol names
+                _bucket = '<5.0%'
             else:
-                pct = 0.0500   # 5.0% — extreme-vol names (2:1 on 2.50% stop)
+                pct = 0.0070   # 0.70% — extreme-vol names
+                _bucket = '>=5.0%'
             self._last_atr_target_pct = pct
         else:
             pct = {
-                HoldPeriod.INTRADAY: 0.0200,                     # medium-tier default
+                HoldPeriod.INTRADAY: 0.0040,                     # 0.40% fallback (ATR unavailable)
                 HoldPeriod.SWING:    config.swing_take_profit_pct,
                 HoldPeriod.POSITION: config.position_take_profit_pct,
             }.get(hold, config.swing_take_profit_pct)
             self._last_atr_target_pct = None
 
         type_str = trade_type.value if hasattr(trade_type, 'value') else str(trade_type)
-        if type_str in ('buy', 'long'):
-            return round(entry * (1 + pct), 2)  # Target above entry for longs
-        return round(entry * (1 - pct), 2)       # Target below entry for shorts
+        is_long = type_str in ('buy', 'long')
+        target = round(entry * (1 + pct), 2) if is_long else round(entry * (1 - pct), 2)
+
+        if hold == HoldPeriod.INTRADAY and ticker:
+            atr_str = f'{atr_pct:.1f}%' if (atr_pct is not None and atr_pct > 0) else 'N/A'
+            bucket_str = _bucket or 'fallback'
+            print(f'[tp_tier] {ticker} — ATR {atr_str} -> {bucket_str} bucket -> TP {pct*100:.2f}% (entry {entry:.2f}, target {target:.2f})')
+
+        return target
 
     def get_hold_period_safe(self, requested_hold: HoldPeriod) -> HoldPeriod:
         """

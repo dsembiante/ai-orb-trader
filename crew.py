@@ -410,12 +410,9 @@ def run_gap_fade_ticker(
         market_data.current_price, trade_str, hold,
         atr_pct=market_data.atr_pct, ticker=ticker,
     )
-    take_profit = (
-        raw_dict.get('gap_fade_target')
-        or sizer.get_take_profit(
-            market_data.current_price, trade_str, hold,
-            atr_pct=market_data.atr_pct, ticker=ticker,
-        )
+    take_profit = sizer.get_take_profit(
+        market_data.current_price, trade_str, hold,
+        atr_pct=market_data.atr_pct, ticker=ticker,
     )
 
     decision = TradeDecision(
@@ -567,12 +564,9 @@ def run_vwap_reversion_ticker(
         market_data.current_price, trade_str, hold,
         atr_pct=market_data.atr_pct, ticker=ticker,
     )
-    take_profit = (
-        raw_dict.get('vwap_target')
-        or sizer.get_take_profit(
-            market_data.current_price, trade_str, hold,
-            atr_pct=market_data.atr_pct, ticker=ticker,
-        )
+    take_profit = sizer.get_take_profit(
+        market_data.current_price, trade_str, hold,
+        atr_pct=market_data.atr_pct, ticker=ticker,
     )
 
     decision = TradeDecision(
