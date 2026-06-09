@@ -782,6 +782,16 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
     except Exception as e:
         log_error('spy_intraday_check', 'SPY', str(e))
 
+    # ── SPY Session VWAP Position ─────────────────────────────────────────────
+    # Read once per cycle; used by the momentum-short gate to require SPY to be
+    # trading below its session VWAP before allowing momentum shorts.
+    # None on fetch failure → gate defaults to block (fail-safe).
+    spy_above_vwap = None
+    try:
+        _, spy_above_vwap = collector.get_vwap('SPY')
+    except Exception as e:
+        log_error('spy_vwap_check', 'SPY', str(e))
+
     print(f'📈 Market regime: {market_regime.upper()}')
     print(f'📊 Open positions: {len(open_positions)} ({sum(abs(p.get("market_value", 0)) for p in open_positions) / portfolio_value * 100:.1f}% of portfolio deployed)')
 
@@ -1374,9 +1384,13 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
                     )
                     decision.execute = False
 
-            # ── Momentum Short Hard Block ─────────────────────────────────────────
-            # Experiment: block every momentum short to test whether removing them
-            # entirely improves net P&L. Toggle BLOCK_MOMENTUM_SHORTS at module level.
+            # ── Momentum Short Conditional Gate ──────────────────────────────────
+            # Allow a momentum short only when both hold; otherwise block as before
+            # (same log + blocked_trades record so the counterfactual keeps accruing):
+            #   1. SPY trading below its session VWAP — read once at cycle scope as
+            #      spy_above_vwap; None on fetch failure → gate blocks (fail-safe).
+            #   2. Ticker vwap_dist >= LATE_SHORT_VWAP_THRESHOLD (-0.50%) — not an
+            #      extended move. Also enforced downstream by late_short_filter.
             if BLOCK_MOMENTUM_SHORTS and decision.execute:
                 _dt = str(getattr(decision.trade_type, 'value', decision.trade_type) or '').lower()
                 if strategy_used == 'momentum' and _dt in ('short', 'sell_short'):
@@ -1384,38 +1398,45 @@ def run_trading_cycle(circuit_breaker: CircuitBreaker, cycle_time: str = '09:45'
                         _get_vwap_margin_pct(market_data.current_price, market_data.vwap)
                         if market_data.vwap and market_data.current_price else 0.0
                     )
-                    _msg = (
-                        f'[momentum_short_block] {ticker} — BLOCKED: all momentum shorts disabled '
-                        f'(experiment, vwap_dist={_vwap_dist:.2f}%)'
-                    )
-                    print(_msg)
-                    log_error('momentum_short_block', ticker, _msg)
-                    try:
-                        with db.conn.cursor() as _cur:
-                            _cur.execute("""
-                                INSERT INTO blocked_trades
-                                    (ticker, trade_type, filter_name, confidence,
-                                     distance_from_vwap_pct, spy_3_bars_velocity_pct,
-                                     would_be_entry_price, strategy_used)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            """, (
-                                ticker,
-                                _dt,
-                                'momentum_short_block',
-                                decision.confidence,
-                                _vwap_dist,
-                                _compute_3bar_velocity('SPY'),
-                                decision.entry_price or market_data.current_price,
-                                strategy_used,
-                            ))
-                        db.conn.commit()
-                    except Exception as _e:
+                    _spy_below_vwap = (spy_above_vwap is False)
+                    _fresh = _vwap_dist >= LATE_SHORT_VWAP_THRESHOLD
+                    if _spy_below_vwap and _fresh:
+                        print(
+                            f'[momentum_short] {ticker} — ALLOWED: SPY<VWAP, vwap_dist={_vwap_dist:.2f}%'
+                        )
+                    else:
+                        _msg = (
+                            f'[momentum_short_block] {ticker} — BLOCKED: all momentum shorts disabled '
+                            f'(experiment, vwap_dist={_vwap_dist:.2f}%)'
+                        )
+                        print(_msg)
+                        log_error('momentum_short_block', ticker, _msg)
                         try:
-                            db.conn.rollback()
-                        except Exception:
-                            pass
-                        log_error('blocked_trades_insert_fail', ticker, str(_e))
-                    decision.execute = False
+                            with db.conn.cursor() as _cur:
+                                _cur.execute("""
+                                    INSERT INTO blocked_trades
+                                        (ticker, trade_type, filter_name, confidence,
+                                         distance_from_vwap_pct, spy_3_bars_velocity_pct,
+                                         would_be_entry_price, strategy_used)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                """, (
+                                    ticker,
+                                    _dt,
+                                    'momentum_short_block',
+                                    decision.confidence,
+                                    _vwap_dist,
+                                    _compute_3bar_velocity('SPY'),
+                                    decision.entry_price or market_data.current_price,
+                                    strategy_used,
+                                ))
+                            db.conn.commit()
+                        except Exception as _e:
+                            try:
+                                db.conn.rollback()
+                            except Exception:
+                                pass
+                            log_error('blocked_trades_insert_fail', ticker, str(_e))
+                        decision.execute = False
 
             # ── Late-Short Exhaustion Hard Gate ──────────────────────────────────
             # Block shorts where price is already extended below VWAP. Late shorts
