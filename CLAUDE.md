@@ -58,3 +58,13 @@ Position monitor: every 1 minute 8:45-10:30 CT (protective exits only)
 - position_sizer.py — sizing logic stays the same
 - logger.py — stays the same
 - notifier.py — stays the same
+
+## Timezone Conventions
+entry_time is written as datetime.now().isoformat() — a naive ISO string in
+US/Eastern wall-clock time (the Railway container runs with TZ=America/New_York).
+exit_time follows the same naive-ET path when no broker fill timestamp is
+available; when sourced from order.filled_at it is a UTC-aware string (+00:00).
+When building Alpaca bar-fetch windows from stored timestamps, localize naive
+strings as ZoneInfo('America/New_York') then convert to UTC. Do NOT attach
+timezone.utc directly — that shifts the window ~4–5 hours into pre-market and
+produces garbage MFE/MAE values (signature: MFE = 0.0 on nearly every row).

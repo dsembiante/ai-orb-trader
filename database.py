@@ -24,6 +24,7 @@ import functools
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from config import config
 from logger import log_error
 
@@ -682,15 +683,19 @@ class Database:
                 return
 
             UTC = timezone.utc
+            ET  = ZoneInfo('America/New_York')
             try:
                 entry_dt = datetime.fromisoformat(entry_time)
                 exit_dt  = datetime.fromisoformat(exit_time)
             except Exception:
                 return
+            # Naive strings are ET wall-clock (Railway container TZ = America/New_York;
+            # datetime.now() returns ET without tzinfo). Aware strings (e.g. from
+            # order.filled_at which returns UTC+00:00) are left unchanged.
             if entry_dt.tzinfo is None:
-                entry_dt = entry_dt.replace(tzinfo=UTC)
+                entry_dt = entry_dt.replace(tzinfo=ET).astimezone(UTC)
             if exit_dt.tzinfo is None:
-                exit_dt  = exit_dt.replace(tzinfo=UTC)
+                exit_dt  = exit_dt.replace(tzinfo=ET).astimezone(UTC)
 
             # ── Fetch 1-minute bars ───────────────────────────────────────────
             try:
